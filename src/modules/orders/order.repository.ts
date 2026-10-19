@@ -6,6 +6,7 @@ type CreateOrderData = {
   items: {
     productId: string;
     quantity: number;
+    unitPrice: number;
   }[];
   total: number;
 };
@@ -21,6 +22,23 @@ export const orderRepository = {
 
   create(data: CreateOrderData) {
     return prisma.$transaction(async (tx) => {
+      for (const item of data.items) {
+        const result = await tx.inventory.updateMany({
+          where: {
+            productId: item.productId,
+            available: { gte: item.quantity },
+          },
+          data: {
+            available: { decrement: item.quantity },
+            reserved: { increment: item.quantity },
+          },
+        });
+
+        if (result.count !== 1) {
+          throw new Error("Insufficient inventory");
+        }
+      }
+
       return tx.order.create({
         data: {
           customerId: data.customerId,
@@ -29,7 +47,7 @@ export const orderRepository = {
             create: data.items.map((item) => ({
               productId: item.productId,
               quantity: item.quantity,
-              unitPrice: 0,
+              unitPrice: item.unitPrice,
             })),
           },
         },

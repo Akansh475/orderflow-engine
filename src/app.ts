@@ -2,12 +2,14 @@ import express from "express";
 import prisma from "./config/database.js";
 import productRoutes from "./modules/products/product.routes.js";
 import { errorHandler } from "./middleware/error.middleware.js";
+import orderRoutes from "./modules/orders/order.routes.js";
 
 const app = express();
 
 app.use(express.json());
 
 app.use("/products", productRoutes);
+app.use("/orders", orderRoutes);
 
 app.use(errorHandler);
 

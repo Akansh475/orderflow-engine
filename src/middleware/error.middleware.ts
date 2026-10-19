@@ -33,8 +33,16 @@ export const errorHandler: ErrorRequestHandler = (
     });
     return;
   }
-
-  res.status(500).json({
+  if (err.message === "Insufficient inventory") {
+  res.status(409).json({
+    error: {
+      code: "INSUFFICIENT_INVENTORY",
+      message: "Not enough stock available for this order",
+    },
+  });
+  return;
+}
+res.status(500).json({
     error: {
       code: "INTERNAL_SERVER_ERROR",
       message: "An unexpected error occurred",
