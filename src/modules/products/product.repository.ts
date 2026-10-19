@@ -12,4 +12,20 @@ export const productRepository = {
       where: { id },
     });
   },
+
+  create(data: {
+  name: string;
+  description?: string | undefined;
+  price: number;
+}) {
+  return prisma.product.create({
+    data: {
+      name: data.name,
+      ...(data.description !== undefined && {
+        description: data.description,
+      }),
+      price: data.price,
+    },
+  });
+},
 };

@@ -1,4 +1,5 @@
 import { productRepository } from "./product.repository.js";
+import { createProductSchema } from "./product.validation.js";
 
 export const productService = {
   async getAllProducts() {
@@ -13,5 +14,11 @@ export const productService = {
     }
 
     return product;
+  },
+
+  async createProduct(input: unknown) {
+    const data = createProductSchema.parse(input);
+
+    return productRepository.create(data);
   },
 };

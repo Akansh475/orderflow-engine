@@ -21,4 +21,13 @@ export const productController = {
       next(error);
     }
   },
+  async create(req: Request, res: Response, next: NextFunction) {
+  try {
+    const product = await productService.createProduct(req.body);
+
+    res.status(201).json({ data: product });
+  } catch (error) {
+    next(error);
+  }
+},
 };
