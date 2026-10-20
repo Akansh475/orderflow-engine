@@ -26,4 +26,19 @@ const order = await orderService.cancelOrder(orderId);
     next(error);
   }
 },
+async getById(req: Request, res: Response, next: NextFunction) {
+  try {
+    const orderId = req.params.id;
+
+    if (typeof orderId !== "string") {
+      throw new Error("Invalid order ID");
+    }
+
+    const order = await orderService.getOrderById(orderId);
+
+    res.status(200).json({ data: order });
+  } catch (error) {
+    next(error);
+  }
+},
 };

@@ -21,7 +21,16 @@ export const orderRepository = {
       },
     });
   },
-
+ findById(orderId: string) {
+  return prisma.order.findUnique({
+    where: {
+      id: orderId,
+    },
+    include: {
+      items: true,
+    },
+  });
+},
   async create(data: CreateOrderData) {
     try {
       return await prisma.$transaction(async (tx) => {

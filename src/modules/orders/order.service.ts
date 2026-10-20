@@ -39,4 +39,13 @@ export const orderService = {
   async cancelOrder(orderId: string) {
   return orderRepository.cancel(orderId);
 },
+async getOrderById(orderId: string) {
+  const order = await orderRepository.findById(orderId);
+
+  if (!order) {
+    throw new Error("Order not found");
+  }
+
+  return order;
+},
 };
