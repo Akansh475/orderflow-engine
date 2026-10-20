@@ -63,6 +63,13 @@ export const errorHandler: ErrorRequestHandler = (
     });
     return;
   }
+  if (err.message === "Order is not eligible for payment") {
+  return res.status(409).json({ message: err.message });
+}
+
+if (err.message === "Order is not eligible for payment finalization") {
+  return res.status(409).json({ message: err.message });
+}
 
   if (
     err.message === "Only pending orders can be cancelled" ||

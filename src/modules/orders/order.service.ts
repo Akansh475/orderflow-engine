@@ -1,5 +1,6 @@
 import { createOrderSchema } from "./order.validation.js";
 import { orderRepository } from "./order.repository.js";
+import { paymentService } from "../payments/payment.service.js";
 
 export const orderService = {
   async validateAndCalculateOrder(input: unknown) {
@@ -36,8 +37,59 @@ export const orderService = {
       total: Number(total.toFixed(2)),
     });
   },
+  async payOrder(orderId: string) {
+  const order = await orderRepository.startPayment(orderId);
+
+  if (!order) {
+    throw new Error("Order not found");
+  }
+
+  const paymentRecord = await orderRepository.createPaymentRecord(
+    order.id,
+    Number(order.total),
+  );
+
+  let payment;
+
+try {
+  payment = await paymentService.processPayment(
+    order.id,
+    Number(order.total),
+  );
+} catch (error) {
+  const failedPayment = {
+    success: false,
+    transactionId: null,
+    message: "Payment provider error",
+  };
+
+  await orderRepository.updatePaymentRecord(
+    paymentRecord.id,
+    failedPayment,
+  );
+
+  await orderRepository.finalizePayment(order.id, false);
+
+  throw error;
+}
+
+await orderRepository.updatePaymentRecord(paymentRecord.id, payment);
+
+const updatedOrder = await orderRepository.finalizePayment(
+  order.id,
+  payment.success,
+);
+
+return {
+  order: updatedOrder,
+  payment: await orderRepository.getPaymentById(paymentRecord.id),
+};
+},
   async cancelOrder(orderId: string) {
   return orderRepository.cancel(orderId);
+},
+async fulfillOrder(orderId: string) {
+  return orderRepository.fulfillOrder(orderId);
 },
 async getOrderById(orderId: string) {
   const order = await orderRepository.findById(orderId);
@@ -47,5 +99,14 @@ async getOrderById(orderId: string) {
   }
 
   return order;
+},
+async getOrderHistory(orderId: string) {
+  const order = await orderRepository.findById(orderId);
+
+  if (!order) {
+    throw new Error("Order not found");
+  }
+
+  return order.statusHistory;
 },
 };

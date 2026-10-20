@@ -11,6 +11,61 @@ export const orderController = {
       next(error);
     }
   },
+  async getHistory(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const id = req.params.id;
+
+    if (typeof id !== "string") {
+      return res.status(400).json({ message: "Invalid order ID" });
+    }
+
+    const history = await orderService.getOrderHistory(id);
+
+    return res.status(200).json({ history });
+  } catch (error) {
+    next(error);
+  }
+},
+  async fulfill(req: Request, res: Response, next: NextFunction) {
+  try {
+    const id = req.params.id;
+
+    if (typeof id !== "string") {
+      return res.status(400).json({ message: "Invalid order ID" });
+    }
+
+    const order = await orderService.fulfillOrder(id);
+
+    return res.status(200).json({
+      message: "Order fulfilled successfully",
+      order,
+    });
+  } catch (error) {
+    next(error);
+  }
+},
+  async pay(req: Request, res: Response, next: NextFunction) {
+  try {
+    const id = req.params.id;
+
+    if (typeof id !== "string") {
+      return res.status(400).json({ message: "Invalid order ID" });
+    }
+
+    const order = await orderService.payOrder(id);
+
+    return res.status(200).json({
+      message: "Payment processed",
+      order,
+    });
+  } catch (error) {
+    next(error);
+  }
+},
   async cancel(req: Request, res: Response, next: NextFunction) {
   try {
    const orderId = req.params.id;

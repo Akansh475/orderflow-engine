@@ -13,6 +13,7 @@ enum OrderStatus {
   CONFIRMED
   FAILED
   CANCELLED
+  FULFILLED
 }
 
 model Product {
@@ -44,6 +45,8 @@ model Order {
   items     OrderItem[]
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
+  statusHistory OrderStatusHistory[]
+  payments Payment[]
 }
 
 model OrderItem {
@@ -56,4 +59,35 @@ model OrderItem {
   product   Product @relation(fields: [productId], references: [id])
 
   @@unique([orderId, productId])
+}
+model OrderStatusHistory {
+  id        String      @id @default(cuid())
+  orderId   String
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  order     Order       @relation(fields: [orderId], references: [id])
+
+  @@index([orderId, createdAt])
+}
+model Payment {
+  id            String   @id @default(cuid())
+  orderId       String
+  transactionId String?  @unique
+  amount        Decimal  @db.Decimal(10, 2)
+  status        PaymentStatus @default(PENDING)
+  message       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  order         Order    @relation(fields: [orderId], references: [id])
+
+  @@index([orderId, createdAt])
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
 }

@@ -16,41 +16,44 @@ type CreateOrderData = {
 export const orderRepository = {
   findProductsByIds(productIds: string[]) {
     return prisma.product.findMany({
-      where: {
-        id: { in: productIds },
+      where: { id: { in: productIds } },
+    });
+  },
+ getPaymentById(paymentId: string) {
+  return prisma.payment.findUnique({
+    where: { id: paymentId },
+  });
+},
+getPaymentsByOrderId(orderId: string) {
+  return prisma.payment.findMany({
+    where: { orderId },
+    orderBy: { createdAt: "desc" },
+  });
+},
+  findById(orderId: string) {
+    return prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: true,
+        statusHistory: {
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
   },
- findById(orderId: string) {
-  return prisma.order.findUnique({
-    where: {
-      id: orderId,
-    },
-    include: {
-      items: true,
-    },
-  });
-},
+
   async create(data: CreateOrderData) {
     try {
       return await prisma.$transaction(async (tx) => {
-        // 1. Return the existing order if this key was already used.
         if (data.idempotencyKey) {
           const existingOrder = await tx.order.findUnique({
-            where: {
-              idempotencyKey: data.idempotencyKey,
-            },
-            include: {
-              items: true,
-            },
+            where: { idempotencyKey: data.idempotencyKey },
+            include: { items: true },
           });
 
-          if (existingOrder) {
-            return existingOrder;
-          }
+          if (existingOrder) return existingOrder;
         }
 
-        // 2. Reserve inventory atomically.
         for (const item of data.items) {
           const result = await tx.inventory.updateMany({
             where: {
@@ -68,7 +71,6 @@ export const orderRepository = {
           }
         }
 
-        // 3. Create the order and its items.
         return tx.order.create({
           data: {
             customerId: data.customerId,
@@ -83,88 +85,304 @@ export const orderRepository = {
                 unitPrice: item.unitPrice,
               })),
             },
+            statusHistory: {
+              create: {
+                status: "PENDING",
+                note: "Order created",
+              },
+            },
           },
           include: {
             items: true,
+            statusHistory: {
+              orderBy: { createdAt: "asc" },
+            },
           },
         });
       });
     } catch (error) {
-      // A concurrent request may have created the same order first.
       if (
         data.idempotencyKey &&
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
       ) {
         const existingOrder = await prisma.order.findUnique({
-          where: {
-            idempotencyKey: data.idempotencyKey,
-          },
-          include: {
-            items: true,
-          },
+          where: { idempotencyKey: data.idempotencyKey },
+          include: { items: true },
         });
 
-        if (existingOrder) {
-          return existingOrder;
-        }
+        if (existingOrder) return existingOrder;
       }
 
       throw error;
     }
   },
-  async cancel(orderId: string) {
-  return prisma.$transaction(async (tx) => {
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-      include: { items: true },
-    });
+  async createPaymentRecord(orderId: string, amount: number) {
+  return prisma.payment.create({
+    data: {
+      orderId,
+      amount,
+      status: "PENDING",
+      message: "Payment attempt created",
+    },
+  });
+},
+async updatePaymentRecord(
+  paymentId: string,
+  result: {
+    success: boolean;
+    transactionId: string | null;
+    message: string;
+  },
+) {
+  return prisma.payment.update({
+    where: { id: paymentId },
+    data: {
+      status: result.success ? "SUCCEEDED" : "FAILED",
+      transactionId: result.transactionId,
+      message: result.message,
+    },
+  });
+},
 
-    if (!order) {
-      throw new Error("Order not found");
-    }
-
-    if (order.status !== "PENDING") {
-      throw new Error("Only pending orders can be cancelled");
-    }
-
-    // Change status conditionally to prevent duplicate cancellation.
-    const updated = await tx.order.updateMany({
-      where: {
-        id: orderId,
-        status: "PENDING",
-      },
-      data: {
-        status: "CANCELLED",
-      },
-    });
-
-    if (updated.count !== 1) {
-      throw new Error("Order cannot be cancelled");
-    }
-
-    // Release the reserved inventory for every order item.
-    for (const item of order.items) {
-      const result = await tx.inventory.updateMany({
+  async startPayment(orderId: string) {
+    return prisma.$transaction(async (tx) => {
+      const updated = await tx.order.updateMany({
         where: {
-          productId: item.productId,
-          reserved: { gte: item.quantity },
+          id: orderId,
+          status: "PENDING",
         },
         data: {
-          reserved: { decrement: item.quantity },
-          available: { increment: item.quantity },
+          status: "PAYMENT_PROCESSING",
         },
       });
 
-      if (result.count !== 1) {
-        throw new Error("Unable to release reserved inventory");
-      }
-    }
+      if (updated.count !== 1) {
+        const order = await tx.order.findUnique({
+          where: { id: orderId },
+        });
 
-    return tx.order.findUnique({
-      where: { id: orderId },
-      include: { items: true },
+        if (!order) throw new Error("Order not found");
+
+        throw new Error("Order is not eligible for payment");
+      }
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId,
+          status: "PAYMENT_PROCESSING",
+          note: "Payment processing started",
+        },
+      });
+
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      });
     });
-  });
-},
+  },
+
+  async finalizePayment(
+    orderId: string,
+    paymentSucceeded: boolean,
+  ) {
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      });
+
+      if (!order) throw new Error("Order not found");
+
+      if (order.status !== "PAYMENT_PROCESSING") {
+        throw new Error(
+          "Order is not eligible for payment finalization",
+        );
+      }
+
+      const nextStatus = paymentSucceeded ? "CONFIRMED" : "FAILED";
+
+      const updated = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: "PAYMENT_PROCESSING",
+        },
+        data: {
+          status: nextStatus,
+        },
+      });
+
+      if (updated.count !== 1) {
+        throw new Error(
+          "Order is not eligible for payment finalization",
+        );
+      }
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId,
+          status: nextStatus,
+          note: paymentSucceeded
+            ? "Payment successful"
+            : "Payment failed",
+        },
+      });
+
+      if (!paymentSucceeded) {
+        for (const item of order.items) {
+          const result = await tx.inventory.updateMany({
+            where: {
+              productId: item.productId,
+              reserved: { gte: item.quantity },
+            },
+            data: {
+              reserved: { decrement: item.quantity },
+              available: { increment: item.quantity },
+            },
+          });
+
+          if (result.count !== 1) {
+            throw new Error("Unable to release reserved inventory");
+          }
+        }
+      }
+
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: true,
+          statusHistory: {
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+    });
+  },
+
+  async fulfillOrder(orderId: string) {
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      });
+
+      if (!order) throw new Error("Order not found");
+
+      if (order.status !== "CONFIRMED") {
+        throw new Error("Only confirmed orders can be fulfilled");
+      }
+
+      const updated = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: "CONFIRMED",
+        },
+        data: {
+          status: "FULFILLED",
+        },
+      });
+
+      if (updated.count !== 1) {
+        throw new Error("Order cannot be fulfilled");
+      }
+
+      for (const item of order.items) {
+        const result = await tx.inventory.updateMany({
+          where: {
+            productId: item.productId,
+            reserved: { gte: item.quantity },
+          },
+          data: {
+            reserved: { decrement: item.quantity },
+          },
+        });
+
+        if (result.count !== 1) {
+          throw new Error("Unable to finalize reserved inventory");
+        }
+      }
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId,
+          status: "FULFILLED",
+          note: "Order fulfilled",
+        },
+      });
+
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: true,
+          statusHistory: {
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+    });
+  },
+
+  async cancel(orderId: string) {
+    return prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      });
+
+      if (!order) throw new Error("Order not found");
+
+      if (order.status !== "PENDING") {
+        throw new Error("Only pending orders can be cancelled");
+      }
+
+      const updated = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: "PENDING",
+        },
+        data: {
+          status: "CANCELLED",
+        },
+      });
+
+      if (updated.count !== 1) {
+        throw new Error("Order cannot be cancelled");
+      }
+
+      for (const item of order.items) {
+        const result = await tx.inventory.updateMany({
+          where: {
+            productId: item.productId,
+            reserved: { gte: item.quantity },
+          },
+          data: {
+            reserved: { decrement: item.quantity },
+            available: { increment: item.quantity },
+          },
+        });
+
+        if (result.count !== 1) {
+          throw new Error("Unable to release reserved inventory");
+        }
+      }
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId,
+          status: "CANCELLED",
+          note: "Order cancelled",
+        },
+      });
+
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: true,
+          statusHistory: {
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+    });
+  },
 };
