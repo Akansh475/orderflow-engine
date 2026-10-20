@@ -30,6 +30,38 @@ export const orderController = {
     next(error);
   }
 },
+async getPayments(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const id = req.params.id;
+
+    if (typeof id !== "string") {
+      return res.status(400).json({ message: "Invalid order ID" });
+    }
+
+    const payments = await orderService.getOrderPayments(id);
+
+    return res.status(200).json({ payments });
+  } catch (error) {
+    next(error);
+  }
+},
+async recoverStuckPayments(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const result = await orderService.recoverStuckPayments();
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+},
   async fulfill(req: Request, res: Response, next: NextFunction) {
   try {
     const id = req.params.id;

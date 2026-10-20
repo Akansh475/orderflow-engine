@@ -19,6 +19,30 @@ export const orderRepository = {
       where: { id: { in: productIds } },
     });
   },
+  findStuckPaymentOrders(cutoff: Date) {
+  return prisma.order.findMany({
+    where: {
+      status: "PAYMENT_PROCESSING",
+      updatedAt: { lt: cutoff },
+    },
+    include: {
+      items: true,
+      payments: true,
+    },
+  });
+},
+async recordPaymentRecovery(
+  orderId: string,
+  note: string,
+) {
+  return prisma.orderStatusHistory.create({
+    data: {
+      orderId,
+      status: "PAYMENT_PROCESSING",
+      note,
+    },
+  });
+},
  getPaymentById(paymentId: string) {
   return prisma.payment.findUnique({
     where: { id: paymentId },

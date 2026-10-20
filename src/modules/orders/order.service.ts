@@ -109,4 +109,31 @@ async getOrderHistory(orderId: string) {
 
   return order.statusHistory;
 },
+async getOrderPayments(orderId: string) {
+  const order = await orderRepository.findById(orderId);
+
+  if (!order) {
+    throw new Error("Order not found");
+  }
+
+  return orderRepository.getPaymentsByOrderId(orderId);
+},
+async recoverStuckPayments() {
+  const cutoff = new Date(Date.now() - 5 * 60 * 1000);
+
+  const orders = await orderRepository.findStuckPaymentOrders(cutoff);
+
+  for (const order of orders) {
+    await orderRepository.recordPaymentRecovery(
+      order.id,
+      "Recovery check performed; payment outcome requires reconciliation",
+    );
+  }
+
+  return {
+    checked: orders.length,
+    orderIds: orders.map((order) => order.id),
+    message: "Recovery checks recorded; no payment states were changed",
+  };
+},
 };
