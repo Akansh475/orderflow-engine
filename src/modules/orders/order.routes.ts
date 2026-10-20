@@ -11,5 +11,6 @@ router.post("/:id/fulfill", orderController.fulfill);
 router.get("/:id/payments", orderController.getPayments);
 router.get("/:id/history", orderController.getHistory);
 router.post("/admin/recover-stuck-payments", orderController.recoverStuckPayments);
-
+router.get("/admin/low-stock", orderController.getLowStockInventory);
+router.post("/admin/restock", orderController.restockInventory);
 export default router;

@@ -19,6 +19,32 @@ export const orderRepository = {
       where: { id: { in: productIds } },
     });
   },
+  findLowStockInventory(threshold: number) {
+  return prisma.inventory.findMany({
+    where: {
+      available: { lte: threshold },
+    },
+    include: {
+      product: true,
+    },
+    orderBy: {
+      available: "asc",
+    },
+  });
+},
+async restockInventory(productId: string, quantity: number) {
+  return prisma.inventory.upsert({
+    where: { productId },
+    update: {
+      available: { increment: quantity },
+    },
+    create: {
+      productId,
+      available: quantity,
+      reserved: 0,
+    },
+  });
+},
   findStuckPaymentOrders(cutoff: Date) {
   return prisma.order.findMany({
     where: {

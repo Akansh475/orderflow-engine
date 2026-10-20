@@ -118,6 +118,30 @@ async getOrderPayments(orderId: string) {
 
   return orderRepository.getPaymentsByOrderId(orderId);
 },
+async getLowStockInventory(threshold = 5) {
+  if (!Number.isInteger(threshold) || threshold < 0) {
+    throw new Error("Stock threshold must be a non-negative integer");
+  }
+
+  return orderRepository.findLowStockInventory(threshold);
+},
+async restockInventory(productId: string, quantity: number) {
+  if (!productId.trim()) {
+    throw new Error("Product ID is required");
+  }
+
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new Error("Restock quantity must be a positive integer");
+  }
+
+  const products = await orderRepository.findProductsByIds([productId]);
+
+  if (products.length === 0) {
+    throw new Error("One or more products were not found");
+  }
+
+  return orderRepository.restockInventory(productId, quantity);
+},
 async recoverStuckPayments() {
   const cutoff = new Date(Date.now() - 5 * 60 * 1000);
 

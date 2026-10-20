@@ -62,6 +62,62 @@ async recoverStuckPayments(
     next(error);
   }
 },
+async getLowStockInventory(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const rawThreshold = req.query.threshold;
+    const threshold =
+      rawThreshold === undefined ? 5 : Number(rawThreshold);
+
+    if (!Number.isInteger(threshold) || threshold < 0) {
+      return res.status(400).json({
+        message: "Threshold must be a non-negative integer",
+      });
+    }
+
+    const inventory =
+      await orderService.getLowStockInventory(threshold);
+
+    return res.status(200).json({ inventory });
+  } catch (error) {
+    next(error);
+  }
+},
+async restockInventory(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const productId = req.body.productId;
+    const quantity = req.body.quantity;
+
+    if (
+      typeof productId !== "string" ||
+      !Number.isInteger(quantity) ||
+      quantity <= 0
+    ) {
+      return res.status(400).json({
+        message: "A valid productId and positive integer quantity are required",
+      });
+    }
+
+    const inventory = await orderService.restockInventory(
+      productId,
+      quantity,
+    );
+
+    return res.status(200).json({
+      message: "Inventory restocked successfully",
+      inventory,
+    });
+  } catch (error) {
+    next(error);
+  }
+},
   async fulfill(req: Request, res: Response, next: NextFunction) {
   try {
     const id = req.params.id;
