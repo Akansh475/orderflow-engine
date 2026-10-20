@@ -1,4 +1,3 @@
-
 import { createOrderSchema } from "./order.validation.js";
 import { orderRepository } from "./order.repository.js";
 
@@ -6,9 +5,7 @@ export const orderService = {
   async validateAndCalculateOrder(input: unknown) {
     const data = createOrderSchema.parse(input);
 
-    const productIds = [
-      ...new Set(data.items.map((item) => item.productId)),
-    ];
+    const productIds = [...new Set(data.items.map((item) => item.productId))];
 
     const products = await orderRepository.findProductsByIds(productIds);
 
@@ -34,6 +31,7 @@ export const orderService = {
 
     return orderRepository.create({
       customerId: data.customerId,
+      idempotencyKey: data.idempotencyKey,
       items,
       total: Number(total.toFixed(2)),
     });

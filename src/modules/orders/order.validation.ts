@@ -1,8 +1,8 @@
-
 import { z } from "zod";
 
 export const createOrderSchema = z.object({
   customerId: z.string().trim().min(1, "Customer ID is required"),
+  idempotencyKey: z.string().trim().min(1).optional(),
   items: z
     .array(
       z.object({

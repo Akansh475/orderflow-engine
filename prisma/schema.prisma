@@ -38,6 +38,7 @@ model Inventory {
 model Order {
   id        String      @id @default(cuid())
   customerId String
+  idempotencyKey String? @unique
   status    OrderStatus @default(PENDING)
   total     Decimal     @db.Decimal(10, 2)
   items     OrderItem[]
