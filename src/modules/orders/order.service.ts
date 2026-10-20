@@ -36,4 +36,7 @@ export const orderService = {
       total: Number(total.toFixed(2)),
     });
   },
+  async cancelOrder(orderId: string) {
+  return orderRepository.cancel(orderId);
+},
 };

@@ -104,4 +104,58 @@ export const orderRepository = {
       throw error;
     }
   },
+  async cancel(orderId: string) {
+  return prisma.$transaction(async (tx) => {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
+
+    if (!order) {
+      throw new Error("Order not found");
+    }
+
+    if (order.status !== "PENDING") {
+      throw new Error("Only pending orders can be cancelled");
+    }
+
+    // Change status conditionally to prevent duplicate cancellation.
+    const updated = await tx.order.updateMany({
+      where: {
+        id: orderId,
+        status: "PENDING",
+      },
+      data: {
+        status: "CANCELLED",
+      },
+    });
+
+    if (updated.count !== 1) {
+      throw new Error("Order cannot be cancelled");
+    }
+
+    // Release the reserved inventory for every order item.
+    for (const item of order.items) {
+      const result = await tx.inventory.updateMany({
+        where: {
+          productId: item.productId,
+          reserved: { gte: item.quantity },
+        },
+        data: {
+          reserved: { decrement: item.quantity },
+          available: { increment: item.quantity },
+        },
+      });
+
+      if (result.count !== 1) {
+        throw new Error("Unable to release reserved inventory");
+      }
+    }
+
+    return tx.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
+  });
+},
 };
