@@ -4,12 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
- "test": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs run",
-"test:watch": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs",
-  "dev": "tsx watch src/server.ts",
-  "build": "tsc",
-  "start": "node dist/server.js"
-},
+    "test": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs run",
+    "test:watch": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs",
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "worker": "tsx src/workers/order.worker.ts",
+    "dev:worker": "tsx watch src/workers/order.worker.ts"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Akansh475/orderflow-engine.git"
@@ -27,8 +29,10 @@
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
+    "bullmq": "^6.4.0",
     "dotenv": "^18.0.8",
     "express": "^5.3.0",
+    "ioredis": "^6.0.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
