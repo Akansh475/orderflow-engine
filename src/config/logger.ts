@@ -1,3 +1,4 @@
+
 import pino from "pino";
 import { pinoHttp } from "pino-http";
 import { randomUUID } from "node:crypto";
@@ -21,22 +22,22 @@ export const logger = pino({
 
 export const httpLogger = pinoHttp({
   logger,
-  genReqId: () => randomUUID(),
+  genReqId: (req, res) => {
+    const incomingId = req.headers["x-request-id"];
+    const requestId =
+      typeof incomingId === "string" && incomingId.length <= 128
+        ? incomingId
+        : randomUUID();
+
+    res.setHeader("X-Request-Id", requestId);
+    return requestId;
+  },
   customLogLevel(_req, res, error) {
     if (error || res.statusCode >= 500) return "error";
     if (res.statusCode >= 400) return "warn";
     return "info";
   },
-  customSuccessMessage(req, res) {
-    return `${req.method} ${req.url} completed with status ${res.statusCode}`;
-  },
-  customErrorMessage(req, res, error) {
-    return `${req.method} ${req.url} failed with status ${res.statusCode}: ${error.message}`;
-  },
-  autoLogging: true,
-  quietReqLogger: true,
   customAttributeKeys: {
     reqId: "requestId",
   },
-  
 });
