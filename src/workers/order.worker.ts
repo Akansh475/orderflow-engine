@@ -4,27 +4,44 @@ import {
   connection,
   type OrderConfirmedJob,
 } from "../queues/order.queue.js";
+import prisma from "../config/database.js";
 
 const worker = new Worker<OrderConfirmedJob>(
   "order-events",
   async (job) => {
-    switch (job.name) {
-      case "order-confirmed": {
-        const { orderId, customerId } = job.data;
+    if (job.name !== "order-confirmed") {
+      throw new Error(`Unsupported job type: ${job.name}`);
+    }
 
-        // Placeholder for a real email or notification provider.
-        console.log("Order confirmation processed", {
-          orderId,
-          customerId,
-          jobId: job.id,
-        });
+    const { orderId, customerId } = job.data;
+    const eventId = `order-confirmed-${orderId}`;
 
-        return { success: true, orderId };
+    try {
+      await prisma.processedEvent.create({
+        data: { eventId },
+      });
+    } catch (error) {
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "P2002"
+      ) {
+        console.log(`Skipping duplicate event: ${eventId}`);
+        return { success: true, orderId, duplicate: true };
       }
 
-      default:
-        throw new Error(`Unsupported job type: ${job.name}`);
+      throw error;
     }
+
+    // Simulated notification. Replace with a real provider later.
+    console.log("Order confirmation processed", {
+      orderId,
+      customerId,
+      jobId: job.id,
+    });
+
+    return { success: true, orderId, duplicate: false };
   },
   {
     connection,
@@ -40,16 +57,23 @@ worker.on("failed", (job, error) => {
   console.error(`Job ${job?.id ?? "unknown"} failed:`, error.message);
 });
 
+let shuttingDown = false;
+
 async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   console.log("Shutting down order worker...");
-  await worker.close();
-  await connection.quit();
+
+  try {
+    await worker.close();
+    await connection.quit();
+    await prisma.$disconnect();
+  } catch (error) {
+    console.error("Worker shutdown failed:", error);
+    process.exitCode = 1;
+  }
 }
 
-process.once("SIGINT", () => {
-  void shutdown().catch(console.error);
-});
-
-process.once("SIGTERM", () => {
-  void shutdown().catch(console.error);
-});
+process.once("SIGINT", () => void shutdown());
+process.once("SIGTERM", () => void shutdown());

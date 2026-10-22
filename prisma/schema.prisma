@@ -104,3 +104,11 @@ model OutboxEvent {
   @@index([processedAt, createdAt])
   @@index([aggregateId])
 }
+
+model ProcessedEvent {
+  id          String   @id @default(cuid())
+  eventId     String   @unique
+  processedAt DateTime @default(now())
+
+  @@index([processedAt])
+}
