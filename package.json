@@ -10,7 +10,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "worker": "tsx src/workers/order.worker.ts",
-    "dev:worker": "tsx watch src/workers/order.worker.ts"
+    "dev:worker": "tsx watch src/workers/order.worker.ts",
+    "outbox": "tsx src/modules/outbox/outbox.runner.ts"
+    
   },
   "repository": {
     "type": "git",

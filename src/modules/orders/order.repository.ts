@@ -232,82 +232,97 @@ async updatePaymentRecord(
     });
   },
 
-  async finalizePayment(
-    orderId: string,
-    paymentSucceeded: boolean,
-  ) {
-    return prisma.$transaction(async (tx) => {
-      const order = await tx.order.findUnique({
-        where: { id: orderId },
-        include: { items: true },
-      });
+  
+async finalizePayment(
+  orderId: string,
+  paymentSucceeded: boolean,
+) {
+  return prisma.$transaction(async (tx) => {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
 
-      if (!order) throw new Error("Order not found");
+    if (!order) {
+      throw new Error("Order not found");
+    }
 
-      if (order.status !== "PAYMENT_PROCESSING") {
-        throw new Error(
-          "Order is not eligible for payment finalization",
-        );
-      }
+    if (order.status !== "PAYMENT_PROCESSING") {
+      throw new Error(
+        "Order is not eligible for payment finalization",
+      );
+    }
 
-      const nextStatus = paymentSucceeded ? "CONFIRMED" : "FAILED";
+    const nextStatus = paymentSucceeded ? "CONFIRMED" : "FAILED";
 
-      const updated = await tx.order.updateMany({
-        where: {
-          id: orderId,
-          status: "PAYMENT_PROCESSING",
-        },
-        data: {
-          status: nextStatus,
-        },
-      });
+    const updated = await tx.order.updateMany({
+      where: {
+        id: orderId,
+        status: "PAYMENT_PROCESSING",
+      },
+      data: {
+        status: nextStatus,
+      },
+    });
 
-      if (updated.count !== 1) {
-        throw new Error(
-          "Order is not eligible for payment finalization",
-        );
-      }
+    if (updated.count !== 1) {
+      throw new Error(
+        "Order is not eligible for payment finalization",
+      );
+    }
 
-      await tx.orderStatusHistory.create({
-        data: {
-          orderId,
-          status: nextStatus,
-          note: paymentSucceeded
-            ? "Payment successful"
-            : "Payment failed",
-        },
-      });
+    await tx.orderStatusHistory.create({
+      data: {
+        orderId,
+        status: nextStatus,
+        note: paymentSucceeded
+          ? "Payment successful"
+          : "Payment failed",
+      },
+    });
 
-      if (!paymentSucceeded) {
-        for (const item of order.items) {
-          const result = await tx.inventory.updateMany({
-            where: {
-              productId: item.productId,
-              reserved: { gte: item.quantity },
-            },
-            data: {
-              reserved: { decrement: item.quantity },
-              available: { increment: item.quantity },
-            },
-          });
+    if (!paymentSucceeded) {
+      for (const item of order.items) {
+        const result = await tx.inventory.updateMany({
+          where: {
+            productId: item.productId,
+            reserved: { gte: item.quantity },
+          },
+          data: {
+            reserved: { decrement: item.quantity },
+            available: { increment: item.quantity },
+          },
+        });
 
-          if (result.count !== 1) {
-            throw new Error("Unable to release reserved inventory");
-          }
+        if (result.count !== 1) {
+          throw new Error("Unable to release reserved inventory");
         }
       }
-
-      return tx.order.findUnique({
-        where: { id: orderId },
-        include: {
-          items: true,
-          statusHistory: {
-            orderBy: { createdAt: "asc" },
+    } else {
+      await tx.outboxEvent.create({
+        data: {
+          eventType: "ORDER_CONFIRMED",
+          aggregateId: order.id,
+          payload: {
+            orderId: order.id,
+            customerId: order.customerId,
           },
         },
       });
+    }
+
+    return tx.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: true,
+        statusHistory: {
+          orderBy: { createdAt: "asc" },
+        },
+      },
     });
-  },
+  });
+},
+
 
   async fulfillOrder(orderId: string) {
     return prisma.$transaction(async (tx) => {

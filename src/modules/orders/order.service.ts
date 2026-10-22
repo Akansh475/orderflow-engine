@@ -2,7 +2,8 @@
 import { createOrderSchema } from "./order.validation.js";
 import { orderRepository } from "./order.repository.js";
 import { paymentService } from "../payments/payment.service.js";
-import { enqueueOrderConfirmation } from "../../queues/order.queue.js";
+//import { enqueueOrderConfirmation } from "../../queues/order.queue.js";
+
 
 export const orderService = {
   async validateAndCalculateOrder(input: unknown) {
@@ -80,13 +81,17 @@ export const orderService = {
     await orderRepository.updatePaymentRecord(paymentRecord.id, payment);
 
     const updatedOrder = await orderRepository.finalizePayment(
-      order.id,
-      payment.success,
-    );
+  order.id,
+  payment.success,
+);
 
-    if (payment.success && updatedOrder.status === "CONFIRMED") {
-      await enqueueOrderConfirmation(order.id, order.customerId);
-    }
+if (!updatedOrder) {
+  throw new Error("Order not found after payment finalization");
+}
+
+// if (payment.success && updatedOrder.status === "CONFIRMED") {
+//   await enqueueOrderConfirmation(order.id, order.customerId);
+// }
 
     return {
       order: updatedOrder,

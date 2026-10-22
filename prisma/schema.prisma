@@ -91,3 +91,16 @@ enum PaymentStatus {
   SUCCEEDED
   FAILED
 }
+model OutboxEvent {
+  id          String    @id @default(cuid())
+  eventType   String
+  aggregateId String
+  payload     Json
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+  attempts    Int       @default(0)
+  lastError   String?
+
+  @@index([processedAt, createdAt])
+  @@index([aggregateId])
+}
