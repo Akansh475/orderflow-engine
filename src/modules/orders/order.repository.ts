@@ -13,6 +13,31 @@ type CreateOrderData = {
   total: number;
 };
 
+async function withTransactionRetry<T>(
+  operation: () => Promise<T>,
+  maxAttempts = 3,
+): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      const isWriteConflict =
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2034";
+
+      if (!isWriteConflict || attempt === maxAttempts) {
+        throw error;
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, 25 * attempt),
+      );
+    }
+  }
+
+  throw new Error("Transaction retry limit exceeded");
+}
+
 export const orderRepository = {
   findProductsByIds(productIds: string[]) {
     return prisma.product.findMany({
@@ -94,7 +119,8 @@ getPaymentsByOrderId(orderId: string) {
 
   async create(data: CreateOrderData) {
     try {
-      return await prisma.$transaction(async (tx) => {
+     return await withTransactionRetry(() =>
+    prisma.$transaction(async (tx) => {
         if (data.idempotencyKey) {
           const existingOrder = await tx.order.findUnique({
             where: { idempotencyKey: data.idempotencyKey },
@@ -149,7 +175,8 @@ getPaymentsByOrderId(orderId: string) {
             },
           },
         });
-      });
+      }),
+    );
     } catch (error) {
       if (
         data.idempotencyKey &&

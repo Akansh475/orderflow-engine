@@ -51,4 +51,49 @@ describe("Orders API", () => {
     expect(inventory?.available).toBe(8);
     expect(inventory?.reserved).toBe(2);
   });
+
+  it("should prevent overselling when two orders compete for the last item", async () => {
+    const product = await prisma.product.create({
+      data: {
+        name: `Concurrency Test ${Date.now()}`,
+        price: 100,
+        inventory: {
+          create: {
+            available: 1,
+            reserved: 0,
+          },
+        },
+      },
+    });
+
+    const createOrder = (customerId: string) =>
+      request(app).post("/orders").send({
+        customerId,
+        idempotencyKey: `concurrency-${customerId}-${Date.now()}`,
+        items: [{ productId: product.id, quantity: 1 }],
+      });
+
+    const responses = await Promise.all([
+      createOrder("concurrency-customer-A"),
+      createOrder("concurrency-customer-B"),
+    ]);
+
+    const successfulOrders = responses.filter(
+      (response) => response.status === 201,
+    );
+    const rejectedOrders = responses.filter(
+      (response) => response.status >= 400,
+    );
+
+    expect(successfulOrders).toHaveLength(1);
+    expect(rejectedOrders).toHaveLength(1);
+
+    const inventory = await prisma.inventory.findUnique({
+      where: { productId: product.id },
+    });
+
+    expect(inventory?.available).toBe(0);
+    expect(inventory?.reserved).toBe(1);
+  });
+
 });
