@@ -51,6 +51,10 @@ export const productService = {
   async createProduct(input: unknown) {
     const data = createProductSchema.parse(input);
 
-    return productRepository.create(data);
+    const product = await productRepository.create(data);
+
+    await productCache.invalidateProductLists();
+
+    return product;
   },
 };
