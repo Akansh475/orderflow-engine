@@ -4,6 +4,7 @@ import {
   productQuerySchema,
 } from "./product.validation.js";
 import { createPaginationMeta } from "../../shared/types.js";
+import { productCache } from "./product.cache.js";
 
 export const productService = {
   async getAllProducts(query: unknown = {}) {
@@ -18,11 +19,20 @@ export const productService = {
   },
 
   async getProductById(id: string) {
+    const cacheKey = productCache.getProductDetailKey(id);
+    const cachedProduct = await productCache.get(cacheKey);
+
+    if (cachedProduct) {
+      return cachedProduct;
+    }
+
     const product = await productRepository.findById(id);
 
     if (!product) {
       throw new Error("Product not found");
     }
+
+    await productCache.set(cacheKey, product);
 
     return product;
   },
