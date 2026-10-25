@@ -9,13 +9,24 @@ import { productCache } from "./product.cache.js";
 export const productService = {
   async getAllProducts(query: unknown = {}) {
     const params = productQuerySchema.parse(query);
+    const cacheKey = productCache.getProductListKey(params);
+    const cachedResult = await productCache.get(cacheKey);
+
+    if (cachedResult) {
+      return cachedResult;
+    }
+
     const { products, total } =
       await productRepository.findPaginatedWithCount(params);
 
-    return {
+    const result = {
       data: products,
       pagination: createPaginationMeta(params.page, params.limit, total),
     };
+
+    await productCache.set(cacheKey, result);
+
+    return result;
   },
 
   async getProductById(id: string) {
