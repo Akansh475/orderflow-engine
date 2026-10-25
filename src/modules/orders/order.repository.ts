@@ -1,6 +1,7 @@
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type OrderStatus } from "@prisma/client";
 import prisma from "../../config/database.js";
+import type { OrderQueryParams } from "./order.validation.js";
 
 type CreateOrderData = {
   customerId: string;
@@ -39,6 +40,71 @@ async function withTransactionRetry<T>(
 }
 
 export const orderRepository = {
+  findPaginated(params: OrderQueryParams) {
+    const where: Prisma.OrderWhereInput = {};
+    if (params.status) {
+      where.status = params.status;
+    }
+    if (params.customerId) {
+      where.customerId = params.customerId;
+    }
+
+    const skip = (params.page - 1) * params.limit;
+    const take = params.limit;
+    const orderBy = { [params.sortBy]: params.order };
+
+    return prisma.order.findMany({
+      where,
+      orderBy,
+      skip,
+      take,
+      include: {
+        items: true,
+      },
+    });
+  },
+
+  count(filter: { status?: OrderStatus | undefined; customerId?: string | undefined } = {}) {
+    const where: Prisma.OrderWhereInput = {};
+    if (filter.status) {
+      where.status = filter.status;
+    }
+    if (filter.customerId) {
+      where.customerId = filter.customerId;
+    }
+
+    return prisma.order.count({ where });
+  },
+
+  async findPaginatedWithCount(params: OrderQueryParams) {
+    const where: Prisma.OrderWhereInput = {};
+    if (params.status) {
+      where.status = params.status;
+    }
+    if (params.customerId) {
+      where.customerId = params.customerId;
+    }
+
+    const skip = (params.page - 1) * params.limit;
+    const take = params.limit;
+    const orderBy = { [params.sortBy]: params.order };
+
+    const [orders, total] = await prisma.$transaction([
+      prisma.order.findMany({
+        where,
+        orderBy,
+        skip,
+        take,
+        include: {
+          items: true,
+        },
+      }),
+      prisma.order.count({ where }),
+    ]);
+
+    return { orders, total };
+  },
+
   findProductsByIds(productIds: string[]) {
     return prisma.product.findMany({
       where: { id: { in: productIds } },

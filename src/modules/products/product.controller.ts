@@ -2,10 +2,10 @@ import type { Request, Response, NextFunction } from "express";
 import { productService } from "./product.service.js";
 
 export const productController = {
-  async getAll(_req: Request, res: Response, next: NextFunction) {
+  async getAll(req: Request, res: Response, next: NextFunction) {
     try {
-      const products = await productService.getAllProducts();
-      res.status(200).json({ data: products });
+      const result = await productService.getAllProducts(req.query);
+      res.status(200).json(result);
     } catch (error) {
       next(error);
     }
@@ -21,13 +21,14 @@ export const productController = {
       next(error);
     }
   },
-  async create(req: Request, res: Response, next: NextFunction) {
-  try {
-    const product = await productService.createProduct(req.body);
 
-    res.status(201).json({ data: product });
-  } catch (error) {
-    next(error);
-  }
-},
+  async create(req: Request, res: Response, next: NextFunction) {
+    try {
+      const product = await productService.createProduct(req.body);
+
+      res.status(201).json({ data: product });
+    } catch (error) {
+      next(error);
+    }
+  },
 };

@@ -2,6 +2,15 @@ import type { Request, Response, NextFunction } from "express";
 import { orderService } from "./order.service.js";
 
 export const orderController = {
+  async list(req: Request, res: Response, next: NextFunction) {
+    try {
+      const result = await orderService.listOrders(req.query);
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+
   async create(req: Request, res: Response, next: NextFunction) {
     try {
       const order = await orderService.validateAndCalculateOrder(req.body);

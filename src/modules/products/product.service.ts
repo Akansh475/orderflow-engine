@@ -1,9 +1,20 @@
 import { productRepository } from "./product.repository.js";
-import { createProductSchema } from "./product.validation.js";
+import {
+  createProductSchema,
+  productQuerySchema,
+} from "./product.validation.js";
+import { createPaginationMeta } from "../../shared/types.js";
 
 export const productService = {
-  async getAllProducts() {
-    return productRepository.findAll();
+  async getAllProducts(query: unknown = {}) {
+    const params = productQuerySchema.parse(query);
+    const { products, total } =
+      await productRepository.findPaginatedWithCount(params);
+
+    return {
+      data: products,
+      pagination: createPaginationMeta(params.page, params.limit, total),
+    };
   },
 
   async getProductById(id: string) {

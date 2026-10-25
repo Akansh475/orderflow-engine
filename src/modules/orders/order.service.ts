@@ -1,11 +1,23 @@
 
-import { createOrderSchema } from "./order.validation.js";
+import { createOrderSchema, orderQuerySchema } from "./order.validation.js";
 import { orderRepository } from "./order.repository.js";
 import { paymentService } from "../payments/payment.service.js";
+import { createPaginationMeta } from "../../shared/types.js";
 //import { enqueueOrderConfirmation } from "../../queues/order.queue.js";
 
 
 export const orderService = {
+  async listOrders(query: unknown = {}) {
+    const params = orderQuerySchema.parse(query);
+    const { orders, total } =
+      await orderRepository.findPaginatedWithCount(params);
+
+    return {
+      data: orders,
+      pagination: createPaginationMeta(params.page, params.limit, total),
+    };
+  },
+
   async validateAndCalculateOrder(input: unknown) {
     const data = createOrderSchema.parse(input);
 
