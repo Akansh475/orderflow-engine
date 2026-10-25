@@ -19,6 +19,32 @@ describe("POST /products", () => {
   });
 });
 
+describe("GET /products/:id", () => {
+  it("should return a product by ID", async () => {
+    const product = await prisma.product.create({
+      data: {
+        name: `Detail-Test-${Date.now()}`,
+        price: 99.99,
+      },
+    });
+
+    const response = await request(app).get(`/products/${product.id}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.id).toBe(product.id);
+    expect(response.body.data.name).toBe(product.name);
+
+    await prisma.product.delete({ where: { id: product.id } });
+  });
+
+  it("should return 404 for a non-existent product", async () => {
+    const response = await request(app).get("/products/nonexistent-id-00000");
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("PRODUCT_NOT_FOUND");
+  });
+});
+
 describe("GET /products", () => {
   const prefix = `test-prod-${Date.now()}`;
 
