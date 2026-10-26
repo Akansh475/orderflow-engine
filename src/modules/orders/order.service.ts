@@ -134,30 +134,47 @@ if (!updatedOrder) {
     return orderRepository.expireOrder(orderId);
   },
 
-  async expireStaleOrders(olderThanSeconds?: number) {
+  async expireStaleOrders(olderThanSeconds?: number, batchLimit = 50) {
     const ttlSeconds =
       olderThanSeconds !== undefined && olderThanSeconds > 0
         ? olderThanSeconds
         : getOrderExpirationSeconds();
 
     const cutoff = new Date(Date.now() - ttlSeconds * 1000);
-    const staleOrders = await orderRepository.findStalePendingOrders(cutoff);
-
     const expiredIds: string[] = [];
-    for (const order of staleOrders) {
-      try {
-        await orderRepository.expireOrder(order.id);
-        expiredIds.push(order.id);
-      } catch (error) {
-        logger.warn(
-          { orderId: order.id, err: error },
-          "Failed to expire stale order during sweep reconciliation",
-        );
+    let totalChecked = 0;
+
+    while (true) {
+      const staleOrders = await orderRepository.findStalePendingOrders(
+        cutoff,
+        batchLimit,
+      );
+
+      if (staleOrders.length === 0) {
+        break;
+      }
+
+      totalChecked += staleOrders.length;
+
+      for (const order of staleOrders) {
+        try {
+          await orderRepository.expireOrder(order.id);
+          expiredIds.push(order.id);
+        } catch (error) {
+          logger.warn(
+            { orderId: order.id, err: error },
+            "Failed to expire stale order during sweep reconciliation",
+          );
+        }
+      }
+
+      if (staleOrders.length < batchLimit || expiredIds.length >= 500) {
+        break;
       }
     }
 
     return {
-      checked: staleOrders.length,
+      checked: totalChecked,
       expiredCount: expiredIds.length,
       orderIds: expiredIds,
       cutoff: cutoff.toISOString(),

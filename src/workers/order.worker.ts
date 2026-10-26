@@ -9,90 +9,96 @@ import {
 import prisma from "../config/database.js";
 import { orderRepository } from "../modules/orders/order.repository.js";
 
-const worker = new Worker<OrderJobData>(
-  "order-events",
-  async (job) => {
-    if (job.name === "order-confirmed") {
-      const { orderId, customerId } = job.data as OrderConfirmedJob;
-      const eventId = `order-confirmed-${orderId}`;
+export async function processOrderJob(job: {
+  name: string;
+  data: unknown;
+  id?: string | undefined;
+}) {
+  if (job.name === "order-confirmed") {
+    const { orderId, customerId } = job.data as OrderConfirmedJob;
+    const eventId = `order-confirmed-${orderId}`;
 
-      try {
-        await prisma.processedEvent.create({
-          data: { eventId },
-        });
-      } catch (error) {
-        if (
-          error !== null &&
-          typeof error === "object" &&
-          "code" in error &&
-          error.code === "P2002"
-        ) {
-          console.log(`Skipping duplicate event: ${eventId}`);
-          return { success: true, orderId, duplicate: true };
-        }
-
-        throw error;
+    try {
+      await prisma.processedEvent.create({
+        data: { eventId },
+      });
+    } catch (error) {
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "P2002"
+      ) {
+        console.log(`Skipping duplicate event: ${eventId}`);
+        return { success: true, orderId, duplicate: true };
       }
 
-      // Simulated notification. Replace with a real provider later.
-      console.log("Order confirmation processed", {
+      throw error;
+    }
+
+    // Simulated notification. Replace with a real provider later.
+    console.log("Order confirmation processed", {
+      orderId,
+      customerId,
+      jobId: job.id,
+    });
+
+    return { success: true, orderId, duplicate: false };
+  }
+
+  if (job.name === "order-expiration") {
+    const { orderId } = job.data as OrderExpiredJob;
+    const eventId = `order-expiration-${orderId}`;
+
+    try {
+      await prisma.processedEvent.create({
+        data: { eventId },
+      });
+    } catch (error) {
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "P2002"
+      ) {
+        console.log(`Skipping duplicate event: ${eventId}`);
+        return { success: true, orderId, duplicate: true };
+      }
+
+      throw error;
+    }
+
+    try {
+      const expiredOrder = await orderRepository.expireOrder(orderId);
+      console.log("Order reservation expired", {
         orderId,
-        customerId,
+        status: expiredOrder?.status,
         jobId: job.id,
       });
 
-      return { success: true, orderId, duplicate: false };
-    }
-
-    if (job.name === "order-expiration") {
-      const { orderId } = job.data as OrderExpiredJob;
-      const eventId = `order-expiration-${orderId}`;
-
-      try {
-        await prisma.processedEvent.create({
-          data: { eventId },
-        });
-      } catch (error) {
-        if (
-          error !== null &&
-          typeof error === "object" &&
-          "code" in error &&
-          error.code === "P2002"
-        ) {
-          console.log(`Skipping duplicate event: ${eventId}`);
-          return { success: true, orderId, duplicate: true };
-        }
-
-        throw error;
+      return { success: true, orderId, expired: true, duplicate: false };
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        (error.message === "Order is not eligible for expiration" ||
+          error.message === "Order not found")
+      ) {
+        console.log(
+          `Order ${orderId} is no longer pending or eligible for expiration; skipping`,
+        );
+        return { success: true, orderId, expired: false, duplicate: false };
       }
 
-      try {
-        const expiredOrder = await orderRepository.expireOrder(orderId);
-        console.log("Order reservation expired", {
-          orderId,
-          status: expiredOrder?.status,
-          jobId: job.id,
-        });
-
-        return { success: true, orderId, expired: true, duplicate: false };
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          (error.message === "Order is not eligible for expiration" ||
-            error.message === "Order not found")
-        ) {
-          console.log(
-            `Order ${orderId} is no longer pending or eligible for expiration; skipping`,
-          );
-          return { success: true, orderId, expired: false, duplicate: false };
-        }
-
-        throw error;
-      }
+      throw error;
     }
+  }
 
-    throw new Error(`Unsupported job type: ${job.name}`);
-  },
+  throw new Error(`Unsupported job type: ${job.name}`);
+}
+
+const worker = new Worker<OrderJobData>(
+  "order-events",
+  processOrderJob,
   {
     connection,
     concurrency: 5,
