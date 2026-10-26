@@ -163,6 +163,54 @@ async restockInventory(
     next(error);
   }
 },
+  async expire(req: Request, res: Response, next: NextFunction) {
+    try {
+      const orderId = req.params.id;
+
+      if (typeof orderId !== "string") {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const order = await orderService.expireOrder(orderId);
+
+      return res.status(200).json({
+        message: "Order expired successfully",
+        data: order,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  async expireStale(req: Request, res: Response, next: NextFunction) {
+    try {
+      const rawOlderThan =
+        req.query.olderThanSeconds ?? req.body?.olderThanSeconds;
+      const olderThanSeconds =
+        rawOlderThan !== undefined ? Number(rawOlderThan) : undefined;
+
+      if (
+        olderThanSeconds !== undefined &&
+        (!Number.isFinite(olderThanSeconds) || olderThanSeconds <= 0)
+      ) {
+        return res.status(400).json({
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "olderThanSeconds must be a positive number",
+          },
+        });
+      }
+
+      const result = await orderService.expireStaleOrders(olderThanSeconds);
+
+      return res.status(200).json({
+        message: "Stale order expiration sweep completed",
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
   async cancel(req: Request, res: Response, next: NextFunction) {
   try {
    const orderId = req.params.id;

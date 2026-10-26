@@ -3,6 +3,9 @@ import { createOrderSchema, orderQuerySchema } from "./order.validation.js";
 import { orderRepository } from "./order.repository.js";
 import { paymentService } from "../payments/payment.service.js";
 import { createPaginationMeta } from "../../shared/types.js";
+import { enqueueOrderExpiration } from "../../queues/order.queue.js";
+import { getOrderExpirationSeconds } from "../../config/env.js";
+import { logger } from "../../config/logger.js";
 //import { enqueueOrderConfirmation } from "../../queues/order.queue.js";
 
 
@@ -46,12 +49,24 @@ export const orderService = {
       };
     });
 
-    return orderRepository.create({
+    const order = await orderRepository.create({
       customerId: data.customerId,
       idempotencyKey: data.idempotencyKey,
       items,
       total: Number(total.toFixed(2)),
     });
+
+    try {
+      const expirationDelayMs = getOrderExpirationSeconds() * 1000;
+      await enqueueOrderExpiration(order.id, expirationDelayMs);
+    } catch (error) {
+      logger.warn(
+        { orderId: order.id, err: error },
+        "Failed to enqueue order expiration job; sweeper will reconcile",
+      );
+    }
+
+    return order;
   },
 
   async payOrder(orderId: string) {
@@ -113,6 +128,40 @@ if (!updatedOrder) {
 
   async cancelOrder(orderId: string) {
     return orderRepository.cancel(orderId);
+  },
+
+  async expireOrder(orderId: string) {
+    return orderRepository.expireOrder(orderId);
+  },
+
+  async expireStaleOrders(olderThanSeconds?: number) {
+    const ttlSeconds =
+      olderThanSeconds !== undefined && olderThanSeconds > 0
+        ? olderThanSeconds
+        : getOrderExpirationSeconds();
+
+    const cutoff = new Date(Date.now() - ttlSeconds * 1000);
+    const staleOrders = await orderRepository.findStalePendingOrders(cutoff);
+
+    const expiredIds: string[] = [];
+    for (const order of staleOrders) {
+      try {
+        await orderRepository.expireOrder(order.id);
+        expiredIds.push(order.id);
+      } catch (error) {
+        logger.warn(
+          { orderId: order.id, err: error },
+          "Failed to expire stale order during sweep reconciliation",
+        );
+      }
+    }
+
+    return {
+      checked: staleOrders.length,
+      expiredCount: expiredIds.length,
+      orderIds: expiredIds,
+      cutoff: cutoff.toISOString(),
+    };
   },
 
   async fulfillOrder(orderId: string) {
