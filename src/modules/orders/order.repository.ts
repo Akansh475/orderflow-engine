@@ -148,6 +148,98 @@ async restockInventory(productId: string, quantity: number) {
     },
   });
 },
+  findStalePendingOrders(cutoff: Date, limit = 50) {
+    return prisma.order.findMany({
+      where: {
+        status: "PENDING",
+        createdAt: { lt: cutoff },
+      },
+      include: {
+        items: true,
+      },
+      orderBy: { createdAt: "asc" },
+      take: limit,
+    });
+  },
+  async expireOrder(orderId: string) {
+    return withTransactionRetry(() =>
+      prisma.$transaction(async (tx) => {
+        const order = await tx.order.findUnique({
+          where: { id: orderId },
+          include: { items: true },
+        });
+
+        if (!order) {
+          throw new Error("Order not found");
+        }
+
+        if (order.status !== "PENDING") {
+          throw new Error("Order is not eligible for expiration");
+        }
+
+        const updated = await tx.order.updateMany({
+          where: {
+            id: orderId,
+            status: "PENDING",
+          },
+          data: {
+            status: "CANCELLED",
+          },
+        });
+
+        if (updated.count !== 1) {
+          throw new Error("Order is not eligible for expiration");
+        }
+
+        for (const item of order.items) {
+          const result = await tx.inventory.updateMany({
+            where: {
+              productId: item.productId,
+              reserved: { gte: item.quantity },
+            },
+            data: {
+              reserved: { decrement: item.quantity },
+              available: { increment: item.quantity },
+            },
+          });
+
+          if (result.count !== 1) {
+            throw new Error("Unable to release reserved inventory");
+          }
+        }
+
+        await tx.orderStatusHistory.create({
+          data: {
+            orderId,
+            status: "CANCELLED",
+            note: "Order reservation expired: payment window elapsed",
+          },
+        });
+
+        await tx.outboxEvent.create({
+          data: {
+            eventType: "ORDER_EXPIRED",
+            aggregateId: order.id,
+            payload: {
+              orderId: order.id,
+              customerId: order.customerId,
+              reason: "RESERVATION_TIMEOUT",
+            },
+          },
+        });
+
+        return tx.order.findUnique({
+          where: { id: orderId },
+          include: {
+            items: true,
+            statusHistory: {
+              orderBy: { createdAt: "asc" },
+            },
+          },
+        });
+      }),
+    );
+  },
 async recordPaymentRecovery(
   orderId: string,
   note: string,

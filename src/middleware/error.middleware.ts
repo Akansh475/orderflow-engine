@@ -18,6 +18,7 @@ export const errorHandler: ErrorRequestHandler = (
         : err.message === "Insufficient inventory" ||
             err.message === "Order is not eligible for payment" ||
             err.message === "Order is not eligible for payment finalization" ||
+            err.message === "Order is not eligible for expiration" ||
             err.message === "Only pending orders can be cancelled" ||
             err.message === "Order cannot be cancelled" ||
             err.message === "Unable to release reserved inventory"
@@ -78,6 +79,10 @@ export const errorHandler: ErrorRequestHandler = (
     "Order is not eligible for payment finalization": {
       code: "ORDER_NOT_ELIGIBLE_FOR_PAYMENT",
       message: err.message,
+    },
+    "Order is not eligible for expiration": {
+      code: "ORDER_NOT_ELIGIBLE_FOR_EXPIRATION",
+      message: "This order cannot be expired in its current state",
     },
     "Only pending orders can be cancelled": {
       code: "ORDER_CANNOT_BE_CANCELLED",
