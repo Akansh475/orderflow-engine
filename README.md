@@ -22,6 +22,7 @@ A distributed, high-performance E-Commerce Order & Inventory Management Engine e
 - **Transactional Outbox & Worker**: Guaranteed event dispatch with idempotent background worker processing.
 - **Resilience & Observability**: API rate limiting, structured JSON logging with correlation IDs, health check endpoints (`/health`, `/health/db`).
 - **Product Caching (Cache-Aside)**: High-speed read caching for product detail and paginated listings using Redis with automated invalidation and database fallback.
+- **Order Reservation Expiration & Auto-Release**: Dual-layer reservation lifecycle management combining BullMQ delayed jobs and batch reconciliation sweepers to reclaim inventory from abandoned checkouts, emit `ORDER_EXPIRED` outbox events, and prevent stock starvation.
 
 ---
 
@@ -72,6 +73,67 @@ When a new product is created (`POST /products`):
 
 ---
 
+## Order Reservation Expiration Architecture
+
+### 1. The Core Distributed Problem
+When an order is created, physical inventory is atomically reserved (`available` decrements, `reserved` increments). If a customer abandons checkout or closes their browser, reserved inventory remains locked indefinitely without an expiration mechanism. This leads to **inventory starvation / leakage**, where items appear out-of-stock to other paying customers despite never being purchased.
+
+### 2. Dual-Layer Defense-in-Depth Architecture
+
+OrderFlow Engine implements a resilient **Dual-Layer Expiration System**:
+
+```
+[ POST /orders ] ───────────► Creates Order (PENDING) & Reserves Stock
+       │
+       ├────────────────────► Enqueues Delayed Job (BullMQ) [Delay: 15 min]
+       │                                     │
+       ▼                                     ▼ (After 15 min)
+[ Periodic / Admin Sweeper ] ◄──────── [ order.worker.ts ]
+  (POST /orders/admin/expire-stale)          │
+       │                                     ▼
+       └───────────────► Atomic Database Transaction:
+                         1. Verify order.status === 'PENDING'
+                         2. Transition status: 'PENDING' -> 'CANCELLED'
+                         3. Release inventory: available += qty, reserved -= qty
+                         4. Record OrderStatusHistory audit note
+                         5. Emit OutboxEvent ('ORDER_EXPIRED')
+```
+
+#### Layer 1: Real-Time BullMQ Delayed Jobs
+- Upon order creation (`POST /orders`), a delayed job is registered on the `order-events` queue with `delay: ORDER_EXPIRATION_SECONDS * 1000` and deterministic jobId `order-expiration-${orderId}`.
+- When the expiration window elapses, `order.worker.ts` executes `processOrderJob`.
+- **Worker Idempotency**: Tracked via `ProcessedEvent` table (`eventId: order-expiration-${orderId}`) to ensure duplicate delivery or network retries do not re-process jobs.
+- **Graceful Degradation**: If Redis or BullMQ is temporarily offline during order creation, the error is caught and logged as a warning; order creation succeeds uninterrupted while Layer 2 guarantees eventual cleanup.
+
+#### Layer 2: Batch Reconciliation Sweeper (Defense-in-Depth)
+- If the Redis queue is restarted, flushed, or network partitions occur, delayed jobs could potentially be dropped.
+- The administrative reconciliation sweep (`POST /orders/admin/expire-stale` or background cron) queries for any orders where `status = 'PENDING'` and `createdAt < cutoff`.
+- **Batch Draining**: Sweeps and cancels stale orders in safe batches (default 50 per iteration, up to 500) within atomic transactions, ensuring zero inventory leakage under any failure scenario.
+
+### 3. Concurrency & Race Condition Mitigation
+
+A critical interview design challenge is the **Payment vs Expiration Race Condition**:
+*What happens if the customer clicks "Pay" at second 899 while the expiration worker triggers at second 900?*
+
+- **Atomic State Guard**: Status transitions use strict SQL conditions:
+  ```sql
+  UPDATE "Order" SET status = 'CANCELLED' WHERE id = :id AND status = 'PENDING';
+  ```
+- **Conditional Count Check**: If the update returns `count !== 1`, the order is already in `PAYMENT_PROCESSING`, `CONFIRMED`, or `CANCELLED`.
+- **Payment Safety**: If payment has started (`PAYMENT_PROCESSING`), expiration aborts with HTTP 409 (`ORDER_NOT_ELIGIBLE_FOR_EXPIRATION`) and the worker logs a graceful no-op (`expired: false`).
+- **Inventory Safety**: Inventory is only released when the order successfully transitions from `PENDING` to `CANCELLED`, completely preventing double-release or overselling.
+- **Transactional Outbox Dispatch**: An `ORDER_EXPIRED` event is written within the exact same database transaction, ensuring downstream event consistency.
+
+### 4. Architecture Trade-Offs Considered
+
+| Expiration Strategy | Advantages | Trade-Offs / Disadvantages |
+| :--- | :--- | :--- |
+| **BullMQ Delayed Jobs + Sweeper** *(Implemented)* | Real-time precision; low database load ($O(1)$ push scheduling); bulletproof reliability with sweeper reconciliation fallback. | Requires Redis and active background worker. |
+| **Database Polling Sweeper Only** | Simple architecture; zero Redis queue dependency. | High database read amplification; high latency to inventory release (orders stay locked until the next sweep interval). |
+| **Redis Key Expiration (Keyspace Notifications)** | In-memory pub/sub notifications on key TTL expiry. | Pub/Sub is fire-and-forget; if worker is offline at the moment of expiration, the event is permanently lost without recovery. |
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -80,6 +142,7 @@ When a new product is created (`POST /products`):
 | `DATABASE_URL` | PostgreSQL connection URL | `postgresql://...` |
 | `REDIS_URL` | Redis connection URL | `redis://127.0.0.1:6379` |
 | `PRODUCT_CACHE_TTL_SECONDS` | Product cache expiration time (seconds) | `60` |
+| `ORDER_EXPIRATION_SECONDS` | Order inventory reservation TTL before auto-cancellation (seconds) | `900` (15 min) |
 | `LOG_LEVEL` | Pino log level (`info`, `warn`, `error`, `debug`) | `info` |
 
 ---
