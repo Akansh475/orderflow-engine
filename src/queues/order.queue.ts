@@ -13,7 +13,13 @@ export interface OrderConfirmedJob {
   customerId: string;
 }
 
-export const orderQueue = new Queue<OrderConfirmedJob>("order-events", {
+export interface OrderExpiredJob {
+  orderId: string;
+}
+
+export type OrderJobData = OrderConfirmedJob | OrderExpiredJob;
+
+export const orderQueue = new Queue<OrderJobData, any, string>("order-events", {
   connection,
   defaultJobOptions: {
     attempts: 3,
@@ -35,6 +41,20 @@ export async function enqueueOrderConfirmation(
     { orderId, customerId },
     {
       jobId: `order-confirmed-${orderId}`,
+    },
+  );
+}
+
+export async function enqueueOrderExpiration(
+  orderId: string,
+  delayMs: number,
+): Promise<void> {
+  await orderQueue.add(
+    "order-expiration",
+    { orderId },
+    {
+      delay: delayMs,
+      jobId: `order-expiration-${orderId}`,
     },
   );
 }

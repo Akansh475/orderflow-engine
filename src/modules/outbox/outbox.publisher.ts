@@ -17,19 +17,21 @@ export const outboxPublisher = {
 
     for (const event of events) {
       try {
-        if (event.eventType !== "ORDER_CONFIRMED") {
+        if (event.eventType === "ORDER_CONFIRMED") {
+          const payload = event.payload as {
+            orderId: string;
+            customerId: string;
+          };
+
+          await enqueueOrderConfirmation(
+            payload.orderId,
+            payload.customerId,
+          );
+        } else if (event.eventType === "ORDER_EXPIRED") {
+          // Expiration event processed: downstream audit and notification ready
+        } else {
           throw new Error(`Unsupported outbox event: ${event.eventType}`);
         }
-
-        const payload = event.payload as {
-          orderId: string;
-          customerId: string;
-        };
-
-        await enqueueOrderConfirmation(
-          payload.orderId,
-          payload.customerId,
-        );
 
         await prisma.outboxEvent.update({
           where: { id: event.id },
