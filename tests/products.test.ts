@@ -458,3 +458,112 @@ describe("DELETE /products/:id", () => {
     await prisma.product.delete({ where: { id: product.id } });
   });
 });
+
+describe("PATCH /products/:id/archive & Catalog Filtering", () => {
+  const archivePrefix = `arch-prod-${Date.now()}`;
+  let activeProductId: string;
+  let toArchiveProductId: string;
+
+  beforeAll(async () => {
+    const active = await prisma.product.create({
+      data: {
+        name: `${archivePrefix}-Active Product`,
+        price: 99.0,
+        isArchived: false,
+      },
+    });
+    activeProductId = active.id;
+
+    const toArchive = await prisma.product.create({
+      data: {
+        name: `${archivePrefix}-Archived Product`,
+        price: 49.0,
+        isArchived: false,
+      },
+    });
+    toArchiveProductId = toArchive.id;
+  });
+
+  afterAll(async () => {
+    await prisma.product.deleteMany({
+      where: { name: { startsWith: archivePrefix } },
+    });
+  });
+
+  it("should successfully archive an active product", async () => {
+    const response = await request(app).patch(
+      `/products/${toArchiveProductId}/archive`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("Product archived successfully");
+    expect(response.body.data.id).toBe(toArchiveProductId);
+    expect(response.body.data.isArchived).toBe(true);
+
+    const inDb = await prisma.product.findUnique({
+      where: { id: toArchiveProductId },
+    });
+    expect(inDb?.isArchived).toBe(true);
+  });
+
+  it("should handle repeated archive requests idempotently", async () => {
+    const response = await request(app).patch(
+      `/products/${toArchiveProductId}/archive`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("Product archived successfully");
+    expect(response.body.data.isArchived).toBe(true);
+  });
+
+  it("should return 404 when attempting to archive a nonexistent product", async () => {
+    const response = await request(app).patch(
+      "/products/nonexistent-archive-product-id-000/archive",
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("PRODUCT_NOT_FOUND");
+  });
+
+  it("should exclude archived products from GET /products catalog listings", async () => {
+    const response = await request(app)
+      .get("/products")
+      .query({ search: archivePrefix });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveLength(1);
+    expect(response.body.data[0].id).toBe(activeProductId);
+    expect(response.body.data[0].isArchived).toBe(false);
+
+    const containsArchived = response.body.data.some(
+      (p: { id: string }) => p.id === toArchiveProductId,
+    );
+    expect(containsArchived).toBe(false);
+  });
+
+  it("should calculate pagination totals excluding archived products", async () => {
+    const response = await request(app)
+      .get("/products")
+      .query({ search: archivePrefix, limit: 10, page: 1 });
+
+    expect(response.status).toBe(200);
+    expect(response.body.pagination.total).toBe(1);
+    expect(response.body.pagination.totalPages).toBe(1);
+  });
+
+  it("should return 404 when requesting an archived product via GET /products/:id", async () => {
+    const response = await request(app).get(`/products/${toArchiveProductId}`);
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("PRODUCT_NOT_FOUND");
+  });
+
+  it("should return 404 when attempting to update an archived product", async () => {
+    const response = await request(app)
+      .patch(`/products/${toArchiveProductId}`)
+      .send({ name: "Should Not Update" });
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("PRODUCT_NOT_FOUND");
+  });
+});

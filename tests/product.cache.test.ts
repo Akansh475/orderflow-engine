@@ -382,6 +382,90 @@ describe("Product Caching & Redis Integration", () => {
       await prisma.inventory.delete({ where: { id: inventory.id } });
       await prisma.product.delete({ where: { id: product.id } });
     });
+
+    it("should invalidate detail and list caches when a product is archived via PATCH /products/:id/archive", async () => {
+      // 1. Create product
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-To-Archive-Cache`,
+          price: 85.0,
+          isArchived: false,
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      // 2. Populate caches
+      const detailRes = await request(app).get(`/products/${product.id}`);
+      expect(detailRes.status).toBe(200);
+
+      const listRes = await request(app)
+        .get("/products")
+        .query({ search: testPrefix });
+      expect(listRes.status).toBe(200);
+
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 3. Archive product
+      const archiveRes = await request(app).patch(
+        `/products/${product.id}/archive`,
+      );
+      expect(archiveRes.status).toBe(200);
+      expect(archiveRes.body.data.isArchived).toBe(true);
+
+      // 4. Verify detail and list caches were invalidated
+      expect(await redis.get(detailKey)).toBeNull();
+      expect(await redis.get(listKey)).toBeNull();
+
+      // 5. Subsequent GET /products/:id returns 404 and does not cache
+      const freshGet = await request(app).get(`/products/${product.id}`);
+      expect(freshGet.status).toBe(404);
+      expect(await redis.get(detailKey)).toBeNull();
+    });
+
+    it("should NOT invalidate existing cache entries when archival fails with 404", async () => {
+      // 1. Create product and populate caches
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-Active-Safe-Cache`,
+          price: 95.0,
+          isArchived: false,
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      await request(app).get(`/products/${product.id}`);
+      await request(app).get("/products").query({ search: testPrefix });
+
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 2. Attempt archive on nonexistent ID
+      const failedArchiveRes = await request(app).patch(
+        "/products/nonexistent-archive-cache-id/archive",
+      );
+      expect(failedArchiveRes.status).toBe(404);
+
+      // 3. Verify caches for existing active product remain intact
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+    });
   });
 
   describe("Redis Failure Fallback (Graceful Degradation)", () => {

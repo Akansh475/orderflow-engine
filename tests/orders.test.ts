@@ -306,4 +306,134 @@ describe("Orders API", () => {
     });
   });
 
+  describe("Product Archival & Order Safety", () => {
+    it("should reject order creation when an item is an archived product", async () => {
+      const archivedProduct = await prisma.product.create({
+        data: {
+          name: `Archived Order Item ${Date.now()}`,
+          price: 50.0,
+          isArchived: true,
+          inventory: {
+            create: {
+              available: 10,
+              reserved: 0,
+            },
+          },
+        },
+      });
+
+      const response = await request(app)
+        .post("/orders")
+        .send({
+          customerId: "cust-archived-order",
+          items: [{ productId: archivedProduct.id, quantity: 1 }],
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error.code).toBe("PRODUCT_ARCHIVED");
+
+      const inv = await prisma.inventory.findUnique({
+        where: { productId: archivedProduct.id },
+      });
+      expect(inv?.available).toBe(10);
+      expect(inv?.reserved).toBe(0);
+    });
+
+    it("should reject mixed orders and leave zero partial inventory reservations", async () => {
+      const activeProduct = await prisma.product.create({
+        data: {
+          name: `Active Mixed Item ${Date.now()}`,
+          price: 100.0,
+          isArchived: false,
+          inventory: {
+            create: {
+              available: 10,
+              reserved: 0,
+            },
+          },
+        },
+      });
+
+      const archivedProduct = await prisma.product.create({
+        data: {
+          name: `Archived Mixed Item ${Date.now()}`,
+          price: 150.0,
+          isArchived: true,
+          inventory: {
+            create: {
+              available: 5,
+              reserved: 0,
+            },
+          },
+        },
+      });
+
+      const response = await request(app)
+        .post("/orders")
+        .send({
+          customerId: "cust-mixed-order",
+          items: [
+            { productId: activeProduct.id, quantity: 3 },
+            { productId: archivedProduct.id, quantity: 1 },
+          ],
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error.code).toBe("PRODUCT_ARCHIVED");
+
+      // Verify active product stock was NOT partially reserved
+      const activeInv = await prisma.inventory.findUnique({
+        where: { productId: activeProduct.id },
+      });
+      expect(activeInv?.available).toBe(10);
+      expect(activeInv?.reserved).toBe(0);
+
+      // Verify archived product stock was NOT reserved
+      const archivedInv = await prisma.inventory.findUnique({
+        where: { productId: archivedProduct.id },
+      });
+      expect(archivedInv?.available).toBe(5);
+      expect(archivedInv?.reserved).toBe(0);
+    });
+
+    it("should preserve historical orders when a product is subsequently archived", async () => {
+      const product = await prisma.product.create({
+        data: {
+          name: `Historical Product ${Date.now()}`,
+          price: 200.0,
+          isArchived: false,
+          inventory: {
+            create: {
+              available: 10,
+              reserved: 0,
+            },
+          },
+        },
+      });
+
+      const orderRes = await request(app)
+        .post("/orders")
+        .send({
+          customerId: "cust-history-check",
+          items: [{ productId: product.id, quantity: 2 }],
+        });
+
+      expect(orderRes.status).toBe(201);
+      const orderId = orderRes.body.data.id;
+
+      // Archive the product after order placement
+      const archiveRes = await request(app).patch(
+        `/products/${product.id}/archive`,
+      );
+      expect(archiveRes.status).toBe(200);
+
+      // Verify order and its line items remain intact and readable
+      const orderCheck = await request(app).get(`/orders/${orderId}`);
+      expect(orderCheck.status).toBe(200);
+      expect(orderCheck.body.data.id).toBe(orderId);
+      expect(orderCheck.body.data.items).toHaveLength(1);
+      expect(orderCheck.body.data.items[0].productId).toBe(product.id);
+    });
+  });
+
 });
