@@ -73,6 +73,11 @@ This guarantees that permutations such as `GET /products?page=1&limit=10` and `G
   - All cached list variants (`products:list:*`) are invalidated.
   - Ensures archived products immediately disappear from public catalog listings and return 404 on subsequent direct detail requests.
 
+- **On Product Unarchival / Restore (`PATCH /products/:id/unarchive`)**:
+  - The single-product detail cache (`products:detail:<id>`) is deleted.
+  - All cached list variants (`products:list:*`) are invalidated.
+  - Ensures restored products immediately reappear in public catalog listings, search results, and accurate pagination totals.
+
 - **On Product Deletion (`DELETE /products/:id`)**:
   - The single-product detail cache (`products:detail:<id>`) is deleted.
   - All cached list variants (`products:list:*`) are invalidated.
@@ -299,7 +304,32 @@ npm test
   - Preserves historical orders, audit history, and associated inventory records intact.
 - **Cache Invalidation**: Invalidates `products:detail:<id>` and `products:list:*` upon successful database commit.
 
-### 7. Delete Product (Hard Delete)
+### 7. Unarchive / Restore Product
+- **Method & Route**: `PATCH /products/:id/unarchive`
+- **Response**: `200 OK` with:
+  ```json
+  {
+    "message": "Product restored successfully",
+    "data": {
+      "id": "cmvtg4h9d0000u9x2zemxw5sm",
+      "name": "Mechanical Keyboard Pro",
+      "price": "149.99",
+      "isArchived": false,
+      "createdAt": "2026-10-29T11:14:24.441Z",
+      "updatedAt": "2026-10-29T11:20:15.123Z"
+    }
+  }
+  ```
+- **Idempotency**: Repeated unarchive calls on an already active/unarchived product safely succeed idempotently with `200 OK`.
+- **Errors**: `404 Not Found` with `PRODUCT_NOT_FOUND` if the product does not exist.
+- **Catalog & Order Restoration**:
+  - Restored product immediately reappears in normal `GET /products` catalog listings, search, sorting, and pagination totals.
+  - Product detail lookups (`GET /products/:id`) and updates (`PATCH /products/:id`) behave normally.
+  - New order creation (`POST /orders`) is re-enabled, subject to existing inventory availability and validation rules.
+  - Preserves historical orders, audit history, and existing inventory numbers intact.
+- **Cache Invalidation**: Invalidates `products:detail:<id>` and `products:list:*` upon successful database commit.
+
+### 8. Delete Product (Hard Delete)
 - **Method & Route**: `DELETE /products/:id`
 - **Response**: `200 OK` with `{ "message": "Product deleted successfully" }`.
 - **Referential Integrity & Foreign Key Restrictions**:
@@ -319,21 +349,22 @@ npm test
 
 ---
 
-### Comparison: Archiving (Soft Delete) vs Physical Deletion (Hard Delete)
+### Comparison: Product Lifecycle Actions
 
-| Feature / Behavior | Archiving (`PATCH /products/:id/archive`) | Physical Deletion (`DELETE /products/:id`) |
-| :--- | :--- | :--- |
-| **Database Effect** | Updates `isArchived = true` | Executes `DELETE FROM "Product"` |
-| **Historical Orders** | Preserved completely; historical order items remain valid | Blocked with HTTP 409 if any orders reference the product |
-| **Inventory Records** | Retained in database | Blocked with HTTP 409 if inventory record exists |
-| **Catalog Visibility** | Excluded from listings and returns 404 on detail | Permanently removed from database; returns 404 |
-| **New Orders** | Blocked with HTTP 400 (`PRODUCT_ARCHIVED`) | Blocked with HTTP 404 (`PRODUCT_NOT_FOUND`) |
-| **Idempotency** | Yes; repeated calls safely return 200 | No; second call returns 404 |
+| Feature / Behavior | Archiving (`PATCH /products/:id/archive`) | Unarchiving (`PATCH /products/:id/unarchive`) | Physical Deletion (`DELETE /products/:id`) |
+| :--- | :--- | :--- | :--- |
+| **Database Effect** | Updates `isArchived = true` | Updates `isArchived = false` | Executes `DELETE FROM "Product"` |
+| **Historical Orders** | Preserved completely; historical order items remain valid | Preserved completely; historical order items remain valid | Blocked with HTTP 409 if any orders reference the product |
+| **Inventory Records** | Retained in database | Retained in database | Blocked with HTTP 409 if inventory record exists |
+| **Catalog Visibility** | Excluded from listings and returns 404 on detail | Included in listings and returns 200 on detail | Permanently removed from database; returns 404 |
+| **New Orders** | Blocked with HTTP 400 (`PRODUCT_ARCHIVED`) | Allowed (subject to available stock) | Blocked with HTTP 404 (`PRODUCT_NOT_FOUND`) |
+| **Idempotency** | Yes; repeated calls safely return 200 | Yes; repeated calls safely return 200 | No; second call returns 404 |
+| **Cache Invalidation** | Invalidates detail (`:id`) and list (`*`) caches | Invalidates detail (`:id`) and list (`*`) caches | Invalidates detail (`:id`) and list (`*`) caches |
 
 ---
 
 ## Limitations & Future Considerations
 
-1. **Product Unarchival / Restore**: Currently products can be archived via `PATCH /products/:id/archive`. A future administrative endpoint `PATCH /products/:id/restore` (or `unarchive`) can allow reactivating archived products back into public catalog listings and order flows.
+1. **Role-Based Access Control (RBAC)**: Currently, administrative actions like unarchiving, archiving, and deletion are open endpoints. Future iterations will introduce JWT/OAuth2 authentication and role-based guards (`admin`, `merchant`, `customer`).
 2. **Cache Stampede Protection**: Under extreme concurrency spikes on expired popular keys, probabilistic early expiration (XFetch) or distributed mutex locking can prevent multiple simultaneous database queries.
 3. **Distributed Invalidation**: In a multi-cluster deployment with local in-memory L1 caches, Redis Pub/Sub could be added for distributed cache invalidation broadcasts.
