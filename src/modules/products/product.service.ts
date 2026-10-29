@@ -41,7 +41,7 @@ export const productService = {
 
     const product = await productRepository.findById(id);
 
-    if (!product) {
+    if (!product || product.isArchived) {
       throw new Error("Product not found");
     }
 
@@ -63,6 +63,12 @@ export const productService = {
   async updateProduct(id: string, input: unknown) {
     const data = updateProductSchema.parse(input);
 
+    const existing = await productRepository.findById(id);
+
+    if (!existing || existing.isArchived) {
+      throw new Error("Product not found");
+    }
+
     const product = await productRepository.update(id, data);
 
     if (!product) {
@@ -77,11 +83,35 @@ export const productService = {
   async replaceProduct(id: string, input: unknown) {
     const data = replaceProductSchema.parse(input);
 
+    const existing = await productRepository.findById(id);
+
+    if (!existing || existing.isArchived) {
+      throw new Error("Product not found");
+    }
+
     const product = await productRepository.update(id, {
       name: data.name,
       description: data.description ?? null,
       price: data.price,
     });
+
+    if (!product) {
+      throw new Error("Product not found");
+    }
+
+    await productCache.invalidateProduct(id);
+
+    return product;
+  },
+
+  async archiveProduct(id: string) {
+    const existing = await productRepository.findById(id);
+
+    if (!existing) {
+      throw new Error("Product not found");
+    }
+
+    const product = await productRepository.archive(id);
 
     if (!product) {
       throw new Error("Product not found");

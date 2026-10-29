@@ -6,11 +6,12 @@ export const productRepository = {
   findAll(params?: ProductQueryParams) {
     if (!params) {
       return prisma.product.findMany({
+        where: { isArchived: false },
         orderBy: { createdAt: "desc" },
       });
     }
 
-    const where: Prisma.ProductWhereInput = {};
+    const where: Prisma.ProductWhereInput = { isArchived: false };
     if (params.search && params.search.length > 0) {
       where.name = {
         contains: params.search,
@@ -27,7 +28,7 @@ export const productRepository = {
   },
 
   findPaginated(params: ProductQueryParams) {
-    const where: Prisma.ProductWhereInput = {};
+    const where: Prisma.ProductWhereInput = { isArchived: false };
     if (params.search && params.search.length > 0) {
       where.name = {
         contains: params.search,
@@ -44,7 +45,7 @@ export const productRepository = {
   },
 
   count(filter: { search?: string | undefined } = {}) {
-    const where: Prisma.ProductWhereInput = {};
+    const where: Prisma.ProductWhereInput = { isArchived: false };
     if (filter.search && filter.search.length > 0) {
       where.name = {
         contains: filter.search,
@@ -56,7 +57,7 @@ export const productRepository = {
   },
 
   async findPaginatedWithCount(params: ProductQueryParams) {
-    const where: Prisma.ProductWhereInput = {};
+    const where: Prisma.ProductWhereInput = { isArchived: false };
     if (params.search && params.search.length > 0) {
       where.name = {
         contains: params.search,
@@ -81,6 +82,23 @@ export const productRepository = {
     return prisma.product.findUnique({
       where: { id },
     });
+  },
+
+  async archive(id: string) {
+    try {
+      return await prisma.product.update({
+        where: { id },
+        data: { isArchived: true },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2025"
+      ) {
+        return null;
+      }
+      throw error;
+    }
   },
 
   create(data: {

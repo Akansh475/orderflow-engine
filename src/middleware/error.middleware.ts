@@ -9,7 +9,8 @@ export const errorHandler: ErrorRequestHandler = (
   _next,
 ) => {
   const status =
-    err instanceof ZodError
+    err instanceof ZodError ||
+    err.message === "Cannot order archived products"
       ? 400
       : err.message === "Product not found" ||
           err.message === "One or more products were not found" ||
@@ -103,6 +104,10 @@ export const errorHandler: ErrorRequestHandler = (
       code: "PRODUCT_REFERENTIAL_INTEGRITY_VIOLATION",
       message:
         "Product cannot be deleted because it is referenced by existing orders or inventory",
+    },
+    "Cannot order archived products": {
+      code: "PRODUCT_ARCHIVED",
+      message: "Cannot create order with archived products",
     },
   };
 

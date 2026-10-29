@@ -34,6 +34,11 @@ export const orderService = {
       throw new Error("One or more products were not found");
     }
 
+    const archivedProduct = products.find((p) => p.isArchived);
+    if (archivedProduct) {
+      throw new Error("Cannot order archived products");
+    }
+
     const total = data.items.reduce((sum, item) => {
       const product = products.find((p) => p.id === item.productId)!;
       return sum + Number(product.price) * item.quantity;
