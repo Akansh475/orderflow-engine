@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs run",
+    "test": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs run --fileParallelism=false",
     "test:watch": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",

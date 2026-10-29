@@ -2,6 +2,8 @@ import { productRepository } from "./product.repository.js";
 import {
   createProductSchema,
   productQuerySchema,
+  updateProductSchema,
+  replaceProductSchema,
 } from "./product.validation.js";
 import { createPaginationMeta } from "../../shared/types.js";
 import { productCache } from "./product.cache.js";
@@ -56,5 +58,55 @@ export const productService = {
     await productCache.invalidateProductLists();
 
     return product;
+  },
+
+  async updateProduct(id: string, input: unknown) {
+    const data = updateProductSchema.parse(input);
+
+    const product = await productRepository.update(id, data);
+
+    if (!product) {
+      throw new Error("Product not found");
+    }
+
+    await productCache.invalidateProduct(id);
+
+    return product;
+  },
+
+  async replaceProduct(id: string, input: unknown) {
+    const data = replaceProductSchema.parse(input);
+
+    const product = await productRepository.update(id, {
+      name: data.name,
+      description: data.description ?? null,
+      price: data.price,
+    });
+
+    if (!product) {
+      throw new Error("Product not found");
+    }
+
+    await productCache.invalidateProduct(id);
+
+    return product;
+  },
+
+  async deleteProduct(id: string) {
+    const existing = await productRepository.findById(id);
+
+    if (!existing) {
+      throw new Error("Product not found");
+    }
+
+    const deleted = await productRepository.delete(id);
+
+    if (!deleted) {
+      throw new Error("Product not found");
+    }
+
+    await productCache.invalidateProduct(id);
+
+    return { id };
   },
 };

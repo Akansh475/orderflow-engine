@@ -13,7 +13,8 @@ export const errorHandler: ErrorRequestHandler = (
       ? 400
       : err.message === "Product not found" ||
           err.message === "One or more products were not found" ||
-          err.message === "Order not found"
+          err.message === "Order not found" ||
+          (err as { code?: string }).code === "P2025"
         ? 404
         : err.message === "Insufficient inventory" ||
             err.message === "Order is not eligible for payment" ||
@@ -21,7 +22,9 @@ export const errorHandler: ErrorRequestHandler = (
             err.message === "Order is not eligible for expiration" ||
             err.message === "Only pending orders can be cancelled" ||
             err.message === "Order cannot be cancelled" ||
-            err.message === "Unable to release reserved inventory"
+            err.message === "Unable to release reserved inventory" ||
+            err.message === "Product cannot be deleted because it is referenced by existing records" ||
+            (err as { code?: string }).code === "P2003"
           ? 409
           : 500;
 
@@ -96,12 +99,38 @@ export const errorHandler: ErrorRequestHandler = (
       code: "INVENTORY_RELEASE_FAILED",
       message: "Unable to release reserved inventory",
     },
+    "Product cannot be deleted because it is referenced by existing records": {
+      code: "PRODUCT_REFERENTIAL_INTEGRITY_VIOLATION",
+      message:
+        "Product cannot be deleted because it is referenced by existing orders or inventory",
+    },
   };
 
   const knownError = knownErrors[err.message];
 
   if (knownError) {
     res.status(status).json({ error: knownError });
+    return;
+  }
+
+  if ((err as { code?: string }).code === "P2003") {
+    res.status(409).json({
+      error: {
+        code: "PRODUCT_REFERENTIAL_INTEGRITY_VIOLATION",
+        message:
+          "Product cannot be deleted because it is referenced by existing orders or inventory",
+      },
+    });
+    return;
+  }
+
+  if ((err as { code?: string }).code === "P2025") {
+    res.status(404).json({
+      error: {
+        code: "PRODUCT_NOT_FOUND",
+        message: "Product not found",
+      },
+    });
     return;
   }
 

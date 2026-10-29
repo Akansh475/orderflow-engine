@@ -104,4 +104,11 @@ export const productCache = {
   async invalidateProductDetail(id: string): Promise<void> {
     await this.del(this.getProductDetailKey(id));
   },
+
+  async invalidateProduct(id: string): Promise<void> {
+    await Promise.all([
+      this.invalidateProductDetail(id),
+      this.invalidateProductLists(),
+    ]);
+  },
 };

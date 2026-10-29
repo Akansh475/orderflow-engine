@@ -225,8 +225,9 @@ describe("Order Reservation Expiration & Auto-Release", () => {
 
       expect(enqueueSpy).toHaveBeenCalled();
       const lastCall = enqueueSpy.mock.calls[enqueueSpy.mock.calls.length - 1];
-      expect(lastCall[0]).toBe(orderId);
-      expect(lastCall[1]).toBeGreaterThanOrEqual(1000); // positive delay ms
+      expect(lastCall).toBeDefined();
+      expect(lastCall![0]).toBe(orderId);
+      expect(lastCall![1]).toBeGreaterThanOrEqual(1000); // positive delay ms
     });
 
     it("should create order successfully even if enqueueOrderExpiration fails (Graceful Degradation)", async () => {

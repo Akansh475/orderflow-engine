@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import prisma from "../../config/database.js";
 import type { ProductQueryParams } from "./product.validation.js";
 
@@ -97,5 +97,53 @@ export const productRepository = {
         price: data.price,
       },
     });
+  },
+
+  async update(
+    id: string,
+    data: {
+      name?: string | undefined;
+      description?: string | null | undefined;
+      price?: number | undefined;
+    },
+  ) {
+    try {
+      return await prisma.product.update({
+        where: { id },
+        data: {
+          ...(data.name !== undefined && { name: data.name }),
+          ...(data.description !== undefined && { description: data.description }),
+          ...(data.price !== undefined && { price: data.price }),
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2025"
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  },
+
+  async delete(id: string) {
+    try {
+      return await prisma.product.delete({
+        where: { id },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === "P2025") {
+          return null;
+        }
+        if (error.code === "P2003") {
+          throw new Error(
+            "Product cannot be deleted because it is referenced by existing records",
+          );
+        }
+      }
+      throw error;
+    }
   },
 };
