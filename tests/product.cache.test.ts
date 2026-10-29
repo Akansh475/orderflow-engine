@@ -20,6 +20,9 @@ describe("Product Caching & Redis Integration", () => {
   afterAll(async () => {
     vi.restoreAllMocks();
     await productCache.invalidatePattern("products:*");
+    await prisma.inventory.deleteMany({
+      where: { product: { name: { startsWith: testPrefix } } },
+    });
     await prisma.product.deleteMany({
       where: { name: { startsWith: testPrefix } },
     });
@@ -184,6 +187,200 @@ describe("Product Caching & Redis Integration", () => {
         (p: { name: string }) => p.name === `${testPrefix}-Item-New`,
       );
       expect(found).toBe(true);
+    });
+  });
+
+  describe("Cache Invalidation on Product Mutation (Update & Delete)", () => {
+    it("should invalidate both detail cache and all list caches when a product is updated via PATCH", async () => {
+      // 1. Create product
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-To-Patch`,
+          price: 55.0,
+          description: "Original Description",
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      // 2. Populate detail cache and list cache
+      const getDetailRes = await request(app).get(`/products/${product.id}`);
+      expect(getDetailRes.status).toBe(200);
+
+      const getListRes = await request(app)
+        .get("/products")
+        .query({ search: testPrefix });
+      expect(getListRes.status).toBe(200);
+
+      // Verify caches populated
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 3. Perform PATCH mutation
+      const patchRes = await request(app)
+        .patch(`/products/${product.id}`)
+        .send({
+          name: `${testPrefix}-Patched-Successfully`,
+          price: 79.99,
+        });
+
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.data.name).toBe(`${testPrefix}-Patched-Successfully`);
+
+      // 4. Verify detail and list caches were invalidated
+      expect(await redis.get(detailKey)).toBeNull();
+      expect(await redis.get(listKey)).toBeNull();
+
+      // 5. Subsequent GET fetches fresh updated data and repopulates cache
+      const getFreshRes = await request(app).get(`/products/${product.id}`);
+      expect(getFreshRes.status).toBe(200);
+      expect(getFreshRes.body.data.name).toBe(`${testPrefix}-Patched-Successfully`);
+      expect(Number(getFreshRes.body.data.price)).toBe(79.99);
+
+      const repopulated = await redis.get(detailKey);
+      expect(repopulated).not.toBeNull();
+    });
+
+    it("should invalidate both detail cache and all list caches when a product is deleted", async () => {
+      // 1. Create product
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-To-Delete`,
+          price: 40.0,
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      // 2. Populate caches
+      await request(app).get(`/products/${product.id}`);
+      await request(app).get("/products").query({ search: testPrefix });
+
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 3. Delete product
+      const deleteRes = await request(app).delete(`/products/${product.id}`);
+      expect(deleteRes.status).toBe(200);
+
+      // 4. Verify detail and list caches were invalidated
+      expect(await redis.get(detailKey)).toBeNull();
+      expect(await redis.get(listKey)).toBeNull();
+
+      // 5. Subsequent GET returns 404 and does not cache
+      const freshGet = await request(app).get(`/products/${product.id}`);
+      expect(freshGet.status).toBe(404);
+      expect(await redis.get(detailKey)).toBeNull();
+    });
+
+    it("should NOT invalidate existing cache entries when PATCH update fails validation or product is not found", async () => {
+      // 1. Create product and populate caches
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-Failed-Patch-Item`,
+          price: 30.0,
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      await request(app).get(`/products/${product.id}`);
+      await request(app).get("/products").query({ search: testPrefix });
+
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 2. Attempt invalid PATCH (validation error 400)
+      const invalidPatchRes = await request(app)
+        .patch(`/products/${product.id}`)
+        .send({ price: -50 });
+
+      expect(invalidPatchRes.status).toBe(400);
+
+      // 3. Verify caches remain INTACT
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 4. Attempt PATCH on nonexistent ID (404)
+      const nonExistentPatchRes = await request(app)
+        .patch("/products/nonexistent-cache-test-id")
+        .send({ name: "New Name" });
+
+      expect(nonExistentPatchRes.status).toBe(404);
+
+      // 5. Verify caches for existing product remain INTACT
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+    });
+
+    it("should NOT invalidate existing cache entries when DELETE fails due to referential integrity restriction", async () => {
+      // 1. Create product with inventory
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-Protected-Item`,
+          price: 120.0,
+        },
+      });
+
+      const inventory = await prisma.inventory.create({
+        data: {
+          productId: product.id,
+          available: 5,
+          reserved: 0,
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      // 2. Populate caches
+      await request(app).get(`/products/${product.id}`);
+      await request(app).get("/products").query({ search: testPrefix });
+
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 3. Attempt DELETE which is blocked by referential integrity
+      const deleteRes = await request(app).delete(`/products/${product.id}`);
+      expect(deleteRes.status).toBe(409);
+      expect(deleteRes.body.error.code).toBe(
+        "PRODUCT_REFERENTIAL_INTEGRITY_VIOLATION",
+      );
+
+      // 4. Verify caches were NOT invalidated
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // Clean up
+      await prisma.inventory.delete({ where: { id: inventory.id } });
+      await prisma.product.delete({ where: { id: product.id } });
     });
   });
 
