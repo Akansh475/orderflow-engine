@@ -122,6 +122,24 @@ export const productService = {
     return product;
   },
 
+  async unarchiveProduct(id: string) {
+    const existing = await productRepository.findById(id);
+
+    if (!existing) {
+      throw new Error("Product not found");
+    }
+
+    const product = await productRepository.unarchive(id);
+
+    if (!product) {
+      throw new Error("Product not found");
+    }
+
+    await productCache.invalidateProduct(id);
+
+    return product;
+  },
+
   async deleteProduct(id: string) {
     const existing = await productRepository.findById(id);
 

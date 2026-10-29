@@ -466,6 +466,86 @@ describe("Product Caching & Redis Integration", () => {
       expect(await redis.get(detailKey)).not.toBeNull();
       expect(await redis.get(listKey)).not.toBeNull();
     });
+
+    it("should invalidate detail and list caches when a product is restored via PATCH /products/:id/unarchive", async () => {
+      // 1. Create archived product
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-To-Unarchive-Cache`,
+          price: 110.0,
+          isArchived: true,
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      // 2. Populate list cache (will not include the archived product)
+      const listRes1 = await request(app)
+        .get("/products")
+        .query({ search: testPrefix });
+      expect(listRes1.status).toBe(200);
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 3. Restore product
+      const unarchiveRes = await request(app).patch(
+        `/products/${product.id}/unarchive`,
+      );
+      expect(unarchiveRes.status).toBe(200);
+      expect(unarchiveRes.body.data.isArchived).toBe(false);
+
+      // 4. Verify detail and list caches were invalidated
+      expect(await redis.get(detailKey)).toBeNull();
+      expect(await redis.get(listKey)).toBeNull();
+
+      // 5. Subsequent GET /products/:id returns 200 and caches the restored product
+      const freshGet = await request(app).get(`/products/${product.id}`);
+      expect(freshGet.status).toBe(200);
+      expect(freshGet.body.data.isArchived).toBe(false);
+      expect(await redis.get(detailKey)).not.toBeNull();
+    });
+
+    it("should NOT invalidate existing cache entries when restore fails with 404", async () => {
+      // 1. Create product and populate caches
+      const product = await prisma.product.create({
+        data: {
+          name: `${testPrefix}-Active-Safe-Restore-Cache`,
+          price: 99.0,
+          isArchived: false,
+        },
+      });
+
+      const detailKey = productCache.getProductDetailKey(product.id);
+      const listKey = productCache.getProductListKey({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        order: "desc",
+        search: testPrefix,
+      });
+
+      await request(app).get(`/products/${product.id}`);
+      await request(app).get("/products").query({ search: testPrefix });
+
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+
+      // 2. Attempt restore on nonexistent ID
+      const failedRestoreRes = await request(app).patch(
+        "/products/nonexistent-unarchive-cache-id/unarchive",
+      );
+      expect(failedRestoreRes.status).toBe(404);
+
+      // 3. Verify caches for existing active product remain intact
+      expect(await redis.get(detailKey)).not.toBeNull();
+      expect(await redis.get(listKey)).not.toBeNull();
+    });
   });
 
   describe("Redis Failure Fallback (Graceful Degradation)", () => {

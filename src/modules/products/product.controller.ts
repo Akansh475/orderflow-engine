@@ -70,6 +70,20 @@ export const productController = {
     }
   },
 
+  async unarchive(req: Request, res: Response, next: NextFunction) {
+    try {
+      const product = await productService.unarchiveProduct(
+        req.params.id as string,
+      );
+      res.status(200).json({
+        message: "Product restored successfully",
+        data: product,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
       await productService.deleteProduct(req.params.id as string);

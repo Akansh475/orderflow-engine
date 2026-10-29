@@ -567,3 +567,132 @@ describe("PATCH /products/:id/archive & Catalog Filtering", () => {
     expect(response.body.error.code).toBe("PRODUCT_NOT_FOUND");
   });
 });
+
+describe("PATCH /products/:id/unarchive & Catalog Restoration", () => {
+  const unarchivePrefix = `unarch-prod-${Date.now()}`;
+  let archivedProductId: string;
+  let activeProductId: string;
+
+  beforeAll(async () => {
+    const active = await prisma.product.create({
+      data: {
+        name: `${unarchivePrefix}-Alpha Active`,
+        price: 120.0,
+        isArchived: false,
+      },
+    });
+    activeProductId = active.id;
+
+    const archived = await prisma.product.create({
+      data: {
+        name: `${unarchivePrefix}-Beta Archived`,
+        price: 60.0,
+        isArchived: true,
+      },
+    });
+    archivedProductId = archived.id;
+  });
+
+  afterAll(async () => {
+    await prisma.product.deleteMany({
+      where: { name: { startsWith: unarchivePrefix } },
+    });
+  });
+
+  it("should restore an archived product by setting isArchived to false", async () => {
+    // Verify initially hidden from catalog
+    const beforeGet = await request(app)
+      .get("/products")
+      .query({ search: unarchivePrefix });
+    expect(beforeGet.body.data).toHaveLength(1);
+    expect(beforeGet.body.pagination.total).toBe(1);
+
+    // Perform restore
+    const response = await request(app).patch(
+      `/products/${archivedProductId}/unarchive`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("Product restored successfully");
+    expect(response.body.data.id).toBe(archivedProductId);
+    expect(response.body.data.isArchived).toBe(false);
+
+    // Verify in database
+    const inDb = await prisma.product.findUnique({
+      where: { id: archivedProductId },
+    });
+    expect(inDb?.isArchived).toBe(false);
+  });
+
+  it("should safely and idempotently handle repeated restore requests", async () => {
+    // Calling unarchive on an already active/restored product
+    const response = await request(app).patch(
+      `/products/${archivedProductId}/unarchive`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("Product restored successfully");
+    expect(response.body.data.isArchived).toBe(false);
+
+    // Also calling unarchive on another active product
+    const activeResponse = await request(app).patch(
+      `/products/${activeProductId}/unarchive`,
+    );
+    expect(activeResponse.status).toBe(200);
+    expect(activeResponse.body.data.isArchived).toBe(false);
+  });
+
+  it("should return 404 when restoring a nonexistent product", async () => {
+    const response = await request(app).patch(
+      "/products/nonexistent-unarchive-id-99999/unarchive",
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("PRODUCT_NOT_FOUND");
+  });
+
+  it("should include restored products in GET /products catalog listings and pagination totals", async () => {
+    const response = await request(app)
+      .get("/products")
+      .query({ search: unarchivePrefix });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveLength(2);
+    expect(response.body.pagination.total).toBe(2);
+
+    const names = response.body.data.map((p: { name: string }) => p.name);
+    expect(names).toContain(`${unarchivePrefix}-Alpha Active`);
+    expect(names).toContain(`${unarchivePrefix}-Beta Archived`);
+  });
+
+  it("should allow normal product detail lookups (GET /products/:id) on restored product", async () => {
+    const response = await request(app).get(`/products/${archivedProductId}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.id).toBe(archivedProductId);
+    expect(response.body.data.isArchived).toBe(false);
+    expect(response.body.data.name).toBe(`${unarchivePrefix}-Beta Archived`);
+  });
+
+  it("should correctly sort and search listings including the restored product", async () => {
+    const ascResponse = await request(app)
+      .get("/products")
+      .query({ search: unarchivePrefix, sortBy: "price", order: "asc" });
+
+    expect(ascResponse.status).toBe(200);
+    expect(ascResponse.body.data).toHaveLength(2);
+    expect(Number(ascResponse.body.data[0].price)).toBe(60.0);
+    expect(Number(ascResponse.body.data[1].price)).toBe(120.0);
+  });
+
+  it("should allow PATCH updates on the restored product", async () => {
+    const response = await request(app)
+      .patch(`/products/${archivedProductId}`)
+      .send({ name: `${unarchivePrefix}-Beta Restored & Updated` });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.name).toBe(
+      `${unarchivePrefix}-Beta Restored & Updated`,
+    );
+  });
+});

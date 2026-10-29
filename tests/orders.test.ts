@@ -434,6 +434,74 @@ describe("Orders API", () => {
       expect(orderCheck.body.data.items).toHaveLength(1);
       expect(orderCheck.body.data.items[0].productId).toBe(product.id);
     });
+
+    it("should allow restored products to be ordered while respecting inventory constraints", async () => {
+      const product = await prisma.product.create({
+        data: {
+          name: `Restore Order Test ${Date.now()}`,
+          price: 75.0,
+          isArchived: true,
+          inventory: {
+            create: {
+              available: 10,
+              reserved: 0,
+            },
+          },
+        },
+      });
+
+      // 1. Confirm ordering fails while archived
+      const failedOrder = await request(app)
+        .post("/orders")
+        .send({
+          customerId: "cust-restore-test",
+          items: [{ productId: product.id, quantity: 4 }],
+        });
+      expect(failedOrder.status).toBe(400);
+      expect(failedOrder.body.error.code).toBe("PRODUCT_ARCHIVED");
+
+      // 2. Restore product
+      const unarchiveRes = await request(app).patch(
+        `/products/${product.id}/unarchive`,
+      );
+      expect(unarchiveRes.status).toBe(200);
+      expect(unarchiveRes.body.data.isArchived).toBe(false);
+
+      // 3. Place order with restored product (quantity: 4)
+      const successOrder = await request(app)
+        .post("/orders")
+        .send({
+          customerId: "cust-restore-test",
+          items: [{ productId: product.id, quantity: 4 }],
+        });
+
+      expect(successOrder.status).toBe(201);
+      expect(successOrder.body.data.items).toHaveLength(1);
+      expect(successOrder.body.data.items[0].quantity).toBe(4);
+
+      const invAfterSuccess = await prisma.inventory.findUnique({
+        where: { productId: product.id },
+      });
+      expect(invAfterSuccess?.available).toBe(6);
+      expect(invAfterSuccess?.reserved).toBe(4);
+
+      // 4. Test insufficient inventory on restored product (request 10 when 6 available)
+      const insufficientOrder = await request(app)
+        .post("/orders")
+        .send({
+          customerId: "cust-restore-test-2",
+          items: [{ productId: product.id, quantity: 10 }],
+        });
+
+      expect(insufficientOrder.status).toBe(409);
+      expect(insufficientOrder.body.error.code).toBe("INSUFFICIENT_INVENTORY");
+
+      const invAfterReject = await prisma.inventory.findUnique({
+        where: { productId: product.id },
+      });
+      expect(invAfterReject?.available).toBe(6);
+      expect(invAfterReject?.reserved).toBe(4);
+    });
   });
 
 });

@@ -101,6 +101,23 @@ export const productRepository = {
     }
   },
 
+  async unarchive(id: string) {
+    try {
+      return await prisma.product.update({
+        where: { id },
+        data: { isArchived: false },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2025"
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  },
+
   create(data: {
     name: string;
     description?: string | undefined;
