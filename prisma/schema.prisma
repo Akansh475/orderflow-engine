@@ -21,6 +21,7 @@ model Product {
   name        String
   description String?
   price       Decimal     @db.Decimal(10, 2)
+  isArchived  Boolean     @default(false)
   inventory   Inventory?
   orderItems  OrderItem[]
   createdAt   DateTime    @default(now())
