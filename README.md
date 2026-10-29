@@ -59,9 +59,24 @@ This guarantees that permutations such as `GET /products?page=1&limit=10` and `G
 
 ### 4. Cache Invalidation Strategy
 
-When a new product is created (`POST /products`):
-- All cached list variants (`products:list:*`) are invalidated using non-blocking Redis `SCAN` in batches followed by `UNLINK`.
-- Ensures immediate visibility of new inventory in search results and accurate pagination counts (`total`, `totalPages`).
+- **On Product Creation (`POST /products`)**:
+  - All cached list variants (`products:list:*`) are invalidated using non-blocking Redis `SCAN` in batches followed by `UNLINK`.
+  - Ensures immediate visibility of new inventory in search results and accurate pagination counts (`total`, `totalPages`).
+
+- **On Product Update (`PATCH /products/:id` or `PUT /products/:id`)**:
+  - The single-product detail cache (`products:detail:<id>`) is deleted via Redis `DEL`.
+  - All cached list variants (`products:list:*`) are invalidated via non-blocking `SCAN` and `UNLINK`.
+  - Ensures price/name modifications reflect immediately on subsequent detail views and catalog listings.
+
+- **On Product Deletion (`DELETE /products/:id`)**:
+  - The single-product detail cache (`products:detail:<id>`) is deleted.
+  - All cached list variants (`products:list:*`) are invalidated.
+  - Ensures deleted items immediately disappear from product listings and return 404 on direct queries.
+
+- **Mutation Safety & Consistency Policy**:
+  - Cache invalidation is executed **strictly after** the primary PostgreSQL database transaction commits.
+  - If a mutation fails validation (400), target entity does not exist (404), or violates referential integrity (409), cache invalidation is **never triggered**, preserving existing valid cache entries.
+  - **Failure Degradation & Limitation**: Redis cache invalidation runs in a non-fatal try/catch block. If Redis is unreachable during invalidation, the database write still succeeds (availability priority), with a warning logged. In this rare edge case, stale cache entries will persist until their TTL expires (default 60s).
 
 #### Invalidation Trade-Offs Considered
 
@@ -181,8 +196,101 @@ npm test
 
 ---
 
+## API Reference — Product Endpoints
+
+### 1. Create Product
+- **Method & Route**: `POST /products`
+- **Request Body**:
+  ```json
+  {
+    "name": "Mechanical Keyboard",
+    "description": "RGB mechanical keyboard with brown switches",
+    "price": 129.99
+  }
+  ```
+- **Validation**:
+  - `name`: required string, non-empty.
+  - `description`: optional string.
+  - `price`: positive number (> 0).
+- **Response**: `201 Created` with product object.
+- **Cache Invalidation**: Clears all `products:list:*` keys.
+
+### 2. Get Products (Paginated)
+- **Method & Route**: `GET /products`
+- **Query Parameters**:
+  - `page`: positive integer (default: 1).
+  - `limit`: positive integer <= 100 (default: 10).
+  - `sortBy`: `createdAt` | `name` | `price` (default: `createdAt`).
+  - `order`: `asc` | `desc` (default: `desc`).
+  - `search`: optional string filter.
+- **Response**: `200 OK` with `{ data: [...], pagination: { page, limit, total, totalPages, hasNextPage, hasPreviousPage } }`.
+- **Caching**: Served from Redis on cache hit (`products:list:...`).
+
+### 3. Get Product by ID
+- **Method & Route**: `GET /products/:id`
+- **Response**: `200 OK` with `{ data: product }`.
+- **Error**: `404 Not Found` if product does not exist (`PRODUCT_NOT_FOUND`).
+- **Caching**: Served from Redis on cache hit (`products:detail:<id>`).
+
+### 4. Partial Update Product
+- **Method & Route**: `PATCH /products/:id`
+- **Request Body**: (At least one field must be provided; omitted fields remain unchanged)
+  ```json
+  {
+    "price": 119.99,
+    "description": "Updated product description"
+  }
+  ```
+- **Validation**:
+  - `name`: optional non-empty string.
+  - `description`: optional string or `null` (to clear description).
+  - `price`: optional positive number.
+  - Immutable fields (`id`, `createdAt`, `updatedAt`) and unknown properties are strictly forbidden and rejected.
+- **Response**: `200 OK` with `{ data: product }`.
+- **Errors**:
+  - `400 Bad Request` with `VALIDATION_ERROR` for empty bodies, negative prices, empty names, or unknown/immutable fields.
+  - `404 Not Found` with `PRODUCT_NOT_FOUND` if product does not exist.
+- **Cache Invalidation**: Invalidates `products:detail:<id>` and `products:list:*`.
+
+### 5. Replace Product (Full Replacement Semantics)
+- **Method & Route**: `PUT /products/:id`
+- **Request Body**:
+  ```json
+  {
+    "name": "Mechanical Keyboard Pro",
+    "price": 149.99,
+    "description": "Full replacement specification"
+  }
+  ```
+- **Semantics**: Requires `name` and `price`. If `description` is omitted, it is reset to `null`.
+- **Response**: `200 OK` with `{ data: product }`.
+- **Errors**:
+  - `400 Bad Request` with `VALIDATION_ERROR` if required fields are missing.
+  - `404 Not Found` with `PRODUCT_NOT_FOUND` if product does not exist.
+- **Cache Invalidation**: Invalidates `products:detail:<id>` and `products:list:*`.
+
+### 6. Delete Product
+- **Method & Route**: `DELETE /products/:id`
+- **Response**: `200 OK` with `{ "message": "Product deleted successfully" }`.
+- **Referential Integrity & Foreign Key Restrictions**:
+  - **Orders Protection**: If an order has been placed containing this product (`OrderItem` record exists), deletion is **blocked** by database foreign key constraints to preserve financial order history and audit integrity.
+  - **Inventory Protection**: If an active inventory record exists for this product, deletion is **blocked**.
+  - **Error Response**: `409 Conflict` with:
+    ```json
+    {
+      "error": {
+        "code": "PRODUCT_REFERENTIAL_INTEGRITY_VIOLATION",
+        "message": "Product cannot be deleted because it is referenced by existing orders or inventory"
+      }
+    }
+    ```
+- **Error**: `404 Not Found` with `PRODUCT_NOT_FOUND` if product does not exist.
+- **Cache Invalidation**: Invalidates `products:detail:<id>` and `products:list:*` upon successful deletion.
+
+---
+
 ## Limitations & Future Considerations
 
-1. **Product Mutation Scope**: Currently, product modification (`PUT/PATCH`) and deletion endpoints are not yet implemented. When added, they must invalidate both `products:detail:<id>` and `products:list:*`.
+1. **Soft Deletes vs Hard Deletes**: The current deletion API uses hard deletion (`DELETE FROM "Product"`) guarded by foreign-key referential integrity. In a production enterprise system, soft-deletion (e.g., `deletedAt: DateTime?`, `isArchived: Boolean`) allows archiving obsolete products while retaining historical associations without foreign-key conflicts.
 2. **Cache Stampede Protection**: Under extreme concurrency spikes on expired popular keys, probabilistic early expiration (XFetch) or distributed mutex locking can prevent multiple simultaneous database queries.
 3. **Distributed Invalidation**: In a multi-cluster deployment with local in-memory L1 caches, Redis Pub/Sub could be added for distributed cache invalidation broadcasts.
