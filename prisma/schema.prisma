@@ -48,6 +48,8 @@ model Order {
   updatedAt DateTime    @updatedAt
   statusHistory OrderStatusHistory[]
   payments Payment[]
+
+  @@index([status, createdAt])
 }
 
 model OrderItem {
