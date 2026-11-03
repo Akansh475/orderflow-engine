@@ -23,6 +23,99 @@ A distributed, high-performance E-Commerce Order & Inventory Management Engine e
 - **Resilience & Observability**: API rate limiting, structured JSON logging with correlation IDs, health check endpoints (`/health`, `/health/db`).
 - **Product Caching (Cache-Aside)**: High-speed read caching for product detail and paginated listings using Redis with automated invalidation and database fallback.
 - **Order Reservation Expiration & Auto-Release**: Dual-layer reservation lifecycle management combining BullMQ delayed jobs, a dedicated automated background sweeper runner, and administrative batch reconciliation endpoints to reclaim inventory from abandoned checkouts, emit `ORDER_EXPIRED` outbox events, and prevent stock starvation.
+- **Distributed Advisory Locking**: Multi-replica coordination using PostgreSQL session-level advisory locks on dedicated database connections to prevent duplicate execution across horizontally scaled container instances.
+
+---
+
+## Distributed Advisory Locking Architecture
+
+### 1. The Multi-Replica Distributed Challenge
+
+In production cloud environments (Kubernetes, AWS ECS, Docker Compose replicas), background worker processes (`order.sweeper.runner.ts` and `outbox.runner.ts`) are deployed across multiple containers for high availability.
+
+- **In-Memory Mutex Limitation**: Local boolean flags (`isSweepingState`, `running`) exist only within the memory heap of a single Node.js process. They cannot prevent container replica A and container replica B from triggering sweeps or event dispatches at the exact same second.
+- **Consequences of Uncoordinated Execution**:
+  - Duplicate database queries and range scans multiplying load on PostgreSQL.
+  - Heightened row lock contention and avoidable transaction aborts (`P2034` serialization conflicts).
+  - Outbox workers racing to process and publish the exact same event batches.
+
+### 2. In-Memory Mutex vs. Distributed Lock
+
+| Dimension | In-Memory Mutex (`isSweepingState`, `running`) | Distributed PostgreSQL Advisory Lock (`PostgresAdvisoryLock`) |
+| :--- | :--- | :--- |
+| **Scope** | Single Node.js process / single thread heap | Global across all container instances connected to PostgreSQL |
+| **Multi-Instance Protection** | ❌ None (each replica runs independently) | ✅ Full mutual exclusion across all application replicas |
+| **Overlapping Execution** | Prevents overlapping ticks within the same process | Prevents concurrent ticks across all cluster instances |
+| **Storage / Mechanism** | Local boolean state variable in JavaScript runtime | PostgreSQL engine shared memory table (`pg_locks`) |
+| **Role in Architecture** | Local primary guard to eliminate local event-loop stacking | Distributed coordination guard to eliminate multi-container contention |
+
+### 3. PostgreSQL Advisory Lock Mechanics
+
+OrderFlow Engine uses **Session-Level Advisory Locks** via PostgreSQL's built-in lock manager:
+
+```sql
+-- Non-blocking acquisition attempt:
+SELECT pg_try_advisory_lock($1::bigint) AS acquired;
+
+-- Explicit release:
+SELECT pg_advisory_unlock($1::bigint) AS released;
+```
+
+#### Why Dedicated Connection Ownership is Mandatory
+- **PostgreSQL Session Affinity**: In PostgreSQL, session-level advisory locks belong strictly to a single database session (connection).
+- **Prisma Connection Pooling Hazard**: Prisma's query engine maintains a connection pool, acquiring a connection for a query and immediately releasing it back to the pool. Calling `pg_try_advisory_lock` via `prisma.$queryRaw` would acquire the lock on connection A, return connection A to the pool, run subsequent work on connection B (which does not own the lock!), and fail to release on connection C.
+- **Solution — Dedicated `pg.Client`**: `PostgresAdvisoryLock` encapsulates a dedicated `pg.Client` instance that remains connected for the lifetime of the lock session. The exact TCP connection that acquires the lock holds it throughout the protected block and releases it in `finally`.
+- **Automatic Failure Recovery**: If a worker container crashes, suffers an Out-of-Memory (OOM) kill, or loses network connectivity, PostgreSQL detects the severed TCP socket and **instantly releases all session-level advisory locks** held by that session, preventing deadlocks or orphaned locks.
+
+### 4. Lock Identifiers & Complete Subsystem Isolation
+
+Advisory lock keys are 64-bit integers partitioned into stable, dedicated namespaces:
+
+| Lock Constant | Lock ID | Protected Component | Isolation Boundary |
+| :--- | :--- | :--- | :--- |
+| `ADVISORY_LOCK_IDS.ORDER_SWEEPER` | `100001` | `order.sweeper.runner.ts` | Isolated from outbox publishing |
+| `ADVISORY_LOCK_IDS.OUTBOX_PUBLISHER` | `100002` | `outbox.runner.ts` | Isolated from reservation sweeper |
+
+Because lock IDs are distinct numbers in PostgreSQL's advisory lock namespace, the reservation sweeper and outbox publisher run concurrently without ever blocking or waiting for each other.
+
+### 5. Multi-Replica Execution & Contention Flow
+
+```
+[ Container Replica 1 ]                [ PostgreSQL Engine ]                [ Container Replica 2 ]
+          │                                     │                                     │
+   Interval Tick #1                             │                              Interval Tick #1
+          │                                     │                                     │
+          ├──── pg_try_advisory_lock(100001) ──►│                                     │
+          │     (Acquired: true)                │                                     │
+          │◄────────────────────────────────────┤                                     │
+          │                                     │                                     │
+          │  [Runs Batch Sweep / Outbox]        │◄─── pg_try_advisory_lock(100001) ───┤
+          │                                     │     (Acquired: false - Lock Busy)   │
+          │                                     ├────────────────────────────────────►│
+          │                                     │                                     │
+          │                                     │                               [Skips execution cycle;]
+          │                                     │                               [Logs clear info message]
+          │                                     │                                     │
+          ├──── pg_advisory_unlock(100001) ─────►│                                     │
+          │     (Released: true)                │                                     │
+          │◄────────────────────────────────────┤                                     │
+          │                                     │                                     │
+   Sweep Complete                               │                              Idle until next tick
+```
+
+### 6. Defense-in-Depth: Why Database Transactions & CAS Remain Essential
+
+A common distributed systems pitfall is assuming distributed locks eliminate the need for transactional safety. In OrderFlow Engine, distributed locks provide **operational efficiency**, while database transactions provide **absolute correctness**:
+
+1. **Uncoordinated Triggers**: BullMQ worker jobs (`order.worker.ts`) and administrative endpoints (`POST /orders/admin/expire-stale`) execute outside the runner's lock.
+2. **Network Partitions (Split-Brain)**: If network partitions temporarily affect connectivity, database ACID transactions and Compare-And-Swap (`UPDATE "Order" SET status = 'CANCELLED' WHERE id = :id AND status = 'PENDING'`) guarantee that an order is never cancelled twice and inventory is never double-restored.
+3. **Outbox Guarantee**: Outbox event publishing uses idempotency tracking (`ProcessedEvent`) and atomic status transitions so duplicate delivery cannot corrupt downstream consumers.
+
+### 7. Operational Limitations & Failure Handling
+
+- **Database Offline**: If PostgreSQL is unreachable when `acquire()` is called, `PostgresAdvisoryLock` logs an error, fail-closes, and returns `acquired: false`. The worker skips the cycle and safely retries on the next interval without crashing.
+- **Connection Loss Mid-Execution**: If the dedicated connection drops while work is in flight, PostgreSQL releases the lock on the server side. Client-side error listeners intercept the socket error, mark the state disconnected, and automatically re-establish a fresh client on the subsequent cycle.
+- **Non-Preemptive Execution**: Lock acquisition is non-blocking (`pg_try_advisory_lock`). Replicas that do not obtain the lock do not queue or wait; they skip the current interval and wait for their next scheduled tick.
 
 ---
 
