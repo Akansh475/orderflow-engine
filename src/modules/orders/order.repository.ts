@@ -148,12 +148,31 @@ async restockInventory(productId: string, quantity: number) {
     },
   });
 },
-  findStalePendingOrders(cutoff: Date, limit = 50) {
+  /**
+   * Queries pending orders created before the given cutoff date.
+   * Utilizes the composite index (status, createdAt) to perform an efficient
+   * range scan without scanning the entire orders table.
+   *
+   * @param cutoff - Date boundary (orders created strictly prior are eligible)
+   * @param limit - Batch size limit
+   * @param excludeOrderIds - Optional list of order IDs to exclude (prevents infinite loops on failed orders)
+   */
+  findStalePendingOrders(
+    cutoff: Date,
+    limit = 50,
+    excludeOrderIds?: string[],
+  ) {
+    const where: Prisma.OrderWhereInput = {
+      status: "PENDING",
+      createdAt: { lt: cutoff },
+    };
+
+    if (excludeOrderIds && excludeOrderIds.length > 0) {
+      where.id = { notIn: excludeOrderIds };
+    }
+
     return prisma.order.findMany({
-      where: {
-        status: "PENDING",
-        createdAt: { lt: cutoff },
-      },
+      where,
       include: {
         items: true,
       },
@@ -161,6 +180,36 @@ async restockInventory(productId: string, quantity: number) {
       take: limit,
     });
   },
+
+  /**
+   * Concurrency & Idempotency Strategy for Order Expiration:
+   *
+   * 1. Atomic Database Transaction:
+   *    All operations (status transition, inventory release, audit trail, outbox event)
+   *    are wrapped within a single PostgreSQL transaction with retry on transient write conflicts.
+   *
+   * 2. Row Locking & Conditional Update (Compare-And-Swap):
+   *    Rather than relying on a preliminary status check alone, we execute:
+   *    UPDATE "Order" SET status = 'CANCELLED' WHERE id = :orderId AND status = 'PENDING'
+   *    - Acquires an exclusive row write-lock on the Order record.
+   *    - If two processes (e.g. BullMQ worker and Periodic Sweeper) attempt to expire
+   *      the same order simultaneously, PostgreSQL serializes the updates.
+   *    - The winner updates the row (count = 1).
+   *    - The loser's condition `status = 'PENDING'` evaluates to false after the winner commits,
+   *      resulting in count = 0.
+   *    - The loser throws "Order is not eligible for expiration", triggering an immediate
+   *      transaction rollback without releasing inventory twice.
+   *
+   * 3. Payment Protection:
+   *    If an order was concurrently confirmed or shifted to PAYMENT_PROCESSING,
+   *    the status is no longer PENDING, causing the CAS update to return 0 rows.
+   *    This guarantees that completed or in-flight orders are never cancelled or refunded.
+   *
+   * 4. Inventory Protection (Exact-Once Release):
+   *    Each reserved item is decremented only if reserved >= quantity.
+   *    If any inventory update fails, the entire transaction throws and rolls back,
+   *    ensuring no partially released inventory.
+   */
   async expireOrder(orderId: string) {
     return withTransactionRetry(() =>
       prisma.$transaction(async (tx) => {

@@ -6,6 +6,7 @@ import { createPaginationMeta } from "../../shared/types.js";
 import { enqueueOrderExpiration } from "../../queues/order.queue.js";
 import { getOrderExpirationSeconds } from "../../config/env.js";
 import { logger } from "../../config/logger.js";
+import { orderSweeper } from "./order.sweeper.js";
 //import { enqueueOrderConfirmation } from "../../queues/order.queue.js";
 
 
@@ -140,49 +141,21 @@ if (!updatedOrder) {
   },
 
   async expireStaleOrders(olderThanSeconds?: number, batchLimit = 50) {
-    const ttlSeconds =
-      olderThanSeconds !== undefined && olderThanSeconds > 0
-        ? olderThanSeconds
-        : getOrderExpirationSeconds();
-
-    const cutoff = new Date(Date.now() - ttlSeconds * 1000);
-    const expiredIds: string[] = [];
-    let totalChecked = 0;
-
-    while (true) {
-      const staleOrders = await orderRepository.findStalePendingOrders(
-        cutoff,
-        batchLimit,
-      );
-
-      if (staleOrders.length === 0) {
-        break;
-      }
-
-      totalChecked += staleOrders.length;
-
-      for (const order of staleOrders) {
-        try {
-          await orderRepository.expireOrder(order.id);
-          expiredIds.push(order.id);
-        } catch (error) {
-          logger.warn(
-            { orderId: order.id, err: error },
-            "Failed to expire stale order during sweep reconciliation",
-          );
-        }
-      }
-
-      if (staleOrders.length < batchLimit || expiredIds.length >= 500) {
-        break;
-      }
-    }
+    const result = await orderSweeper.sweep({
+      olderThanSeconds,
+      batchLimit,
+    });
 
     return {
-      checked: totalChecked,
-      expiredCount: expiredIds.length,
-      orderIds: expiredIds,
-      cutoff: cutoff.toISOString(),
+      checked: result.discovered,
+      expiredCount: result.processed,
+      orderIds: result.orderIds,
+      cutoff: result.cutoff,
+      discovered: result.discovered,
+      processed: result.processed,
+      skipped: result.skipped,
+      failed: result.failed,
+      durationMs: result.durationMs,
     };
   },
 

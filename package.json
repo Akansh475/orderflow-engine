@@ -11,7 +11,9 @@
     "start": "node dist/server.js",
     "worker": "tsx src/workers/order.worker.ts",
     "dev:worker": "tsx watch src/workers/order.worker.ts",
-    "outbox": "tsx src/modules/outbox/outbox.runner.ts"
+    "outbox": "tsx src/modules/outbox/outbox.runner.ts",
+    "sweeper": "tsx src/modules/orders/order.sweeper.runner.ts",
+    "dev:sweeper": "tsx watch src/modules/orders/order.sweeper.runner.ts"
     
   },
   "repository": {
