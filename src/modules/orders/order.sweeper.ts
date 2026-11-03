@@ -5,6 +5,10 @@ import {
   getOrderSweeperIntervalMs,
 } from "../../config/env.js";
 import { orderRepository } from "./order.repository.js";
+import {
+  ADVISORY_LOCK_IDS,
+  PostgresAdvisoryLock,
+} from "../../shared/advisory-lock.js";
 
 export interface SweepOptions {
   olderThanSeconds?: number | undefined;
@@ -25,12 +29,15 @@ export interface SweepResult {
 export interface SweeperScheduleOptions extends SweepOptions {
   intervalMs?: number | undefined;
   runImmediately?: boolean | undefined;
+  useDistributedLock?: boolean | undefined;
+  advisoryLock?: PostgresAdvisoryLock | undefined;
 }
 
 export class OrderSweeper {
   private isRunningState = false;
   private isSweepingState = false;
   private timer: NodeJS.Timeout | null = null;
+  private advisoryLock: PostgresAdvisoryLock | null = null;
 
   /**
    * Indicates whether the periodic sweeper loop is actively running.
@@ -44,6 +51,13 @@ export class OrderSweeper {
    */
   public isSweeping(): boolean {
     return this.isSweepingState;
+  }
+
+  /**
+   * Returns the active PostgresAdvisoryLock instance if distributed locking is enabled.
+   */
+  public getAdvisoryLock(): PostgresAdvisoryLock | null {
+    return this.advisoryLock;
   }
 
   /**
@@ -195,6 +209,16 @@ export class OrderSweeper {
     }
 
     this.isRunningState = true;
+
+    if (options?.useDistributedLock ?? false) {
+      this.advisoryLock =
+        options?.advisoryLock ??
+        new PostgresAdvisoryLock({
+          lockId: ADVISORY_LOCK_IDS.ORDER_SWEEPER,
+          name: "order-sweeper",
+        });
+    }
+
     const intervalMs =
       options?.intervalMs !== undefined && options.intervalMs > 0
         ? options.intervalMs
@@ -205,6 +229,7 @@ export class OrderSweeper {
         intervalMs,
         ttlSeconds: options?.olderThanSeconds ?? getOrderExpirationSeconds(),
         batchLimit: options?.batchLimit ?? getOrderSweeperBatchSize(),
+        distributedLockEnabled: this.advisoryLock !== null,
       },
       "Starting periodic order reservation sweeper runner",
     );
@@ -213,7 +238,20 @@ export class OrderSweeper {
       if (!this.isRunningState) return;
 
       try {
-        await this.sweep(options);
+        if (this.advisoryLock) {
+          const lockResult = await this.advisoryLock.withLock(async () => {
+            await this.sweep(options);
+          });
+
+          if (!lockResult.acquired) {
+            logger.info(
+              { lockId: this.advisoryLock.getLockId() },
+              "Order reservation sweeper advisory lock held by another worker instance; skipping scheduled interval",
+            );
+          }
+        } else {
+          await this.sweep(options);
+        }
       } catch (error) {
         logger.error({ err: error }, "Unhandled error during scheduled reservation sweep");
       }
@@ -245,6 +283,11 @@ export class OrderSweeper {
     // Await active sweep completion to ensure clean shutdown
     while (this.isSweepingState) {
       await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    if (this.advisoryLock) {
+      await this.advisoryLock.disconnect();
+      this.advisoryLock = null;
     }
 
     logger.info("Order reservation sweeper stopped");

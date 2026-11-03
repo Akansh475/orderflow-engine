@@ -33,5 +33,5 @@ process.on("uncaughtException", (error) => {
   void shutdown("uncaughtException");
 });
 
-// Start the periodic sweeper runner
-orderSweeper.start();
+// Start the periodic sweeper runner with distributed advisory locking enabled
+orderSweeper.start({ useDistributedLock: true });
