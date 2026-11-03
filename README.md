@@ -22,7 +22,7 @@ A distributed, high-performance E-Commerce Order & Inventory Management Engine e
 - **Transactional Outbox & Worker**: Guaranteed event dispatch with idempotent background worker processing.
 - **Resilience & Observability**: API rate limiting, structured JSON logging with correlation IDs, health check endpoints (`/health`, `/health/db`).
 - **Product Caching (Cache-Aside)**: High-speed read caching for product detail and paginated listings using Redis with automated invalidation and database fallback.
-- **Order Reservation Expiration & Auto-Release**: Dual-layer reservation lifecycle management combining BullMQ delayed jobs and batch reconciliation sweepers to reclaim inventory from abandoned checkouts, emit `ORDER_EXPIRED` outbox events, and prevent stock starvation.
+- **Order Reservation Expiration & Auto-Release**: Dual-layer reservation lifecycle management combining BullMQ delayed jobs, a dedicated automated background sweeper runner, and administrative batch reconciliation endpoints to reclaim inventory from abandoned checkouts, emit `ORDER_EXPIRED` outbox events, and prevent stock starvation.
 
 ---
 
@@ -130,30 +130,73 @@ OrderFlow Engine implements a resilient **Dual-Layer Expiration System**:
 - **Worker Idempotency**: Tracked via `ProcessedEvent` table (`eventId: order-expiration-${orderId}`) to ensure duplicate delivery or network retries do not re-process jobs.
 - **Graceful Degradation**: If Redis or BullMQ is temporarily offline during order creation, the error is caught and logged as a warning; order creation succeeds uninterrupted while Layer 2 guarantees eventual cleanup.
 
-#### Layer 2: Batch Reconciliation Sweeper (Defense-in-Depth)
-- If the Redis queue is restarted, flushed, or network partitions occur, delayed jobs could potentially be dropped.
-- The administrative reconciliation sweep (`POST /orders/admin/expire-stale` or background cron) queries for any orders where `status = 'PENDING'` and `createdAt < cutoff`.
-- **Batch Draining**: Sweeps and cancels stale orders in safe batches (default 50 per iteration, up to 500) within atomic transactions, ensuring zero inventory leakage under any failure scenario.
+#### Layer 2: Dedicated Automated Reservation Sweeper (Reconciliation Safety Net)
+- **Why the Sweeper Exists**:
+  - In a distributed system, primary delayed job mechanisms (BullMQ / Redis) can encounter edge failures: Redis restarts with loss of unpersisted delayed sets, queue crashes, Redis eviction under memory pressure, or transient Redis downtime during checkout creation (where graceful degradation creates the order but skips delayed job scheduling).
+  - Without a sweeper, orders whose delayed jobs were dropped would lock reserved inventory permanently.
+  - The dedicated background sweeper acts as a self-healing reconciliation loop, guaranteeing eventual consistency and reclaiming orphaned inventory.
+- **How It Complements BullMQ Delayed Jobs**:
+  - BullMQ provides low-latency, real-time expiration ($O(1)$ push trigger exactly when the 15-minute window expires).
+  - The Sweeper provides guaranteed safety and correctness via periodic indexed polling, catching any anomalies, missed jobs, or failed worker executions.
+- **Standalone Background Runner**:
+  - Executable entry point: `src/modules/orders/order.sweeper.runner.ts` (runnable via `npm run sweeper`).
+  - Runs independently of the Express API server and BullMQ worker.
+  - Automatically executes an initial sweep on boot, followed by non-overlapping interval execution.
+  - Employs an `isSweeping` mutex guard: if a large sweep iteration takes longer than the configured interval, subsequent ticks are skipped rather than overlapping, preventing connection pool exhaustion and database thrashing.
+- **Batch Processing & Fault Isolation**:
+  - Queries stale orders using an index range scan on composite index `("status", "createdAt")`.
+  - Processes each order inside its own discrete database transaction.
+  - **Fault Isolation**: If a single order encounters an unexpected error (e.g. data corruption or inventory mismatch), it is recorded as `failed`, added to an in-memory exclude list for the remainder of the sweep, and processing continues uninterrupted for all remaining orders.
+  - Drains up to `maxOrdersPerSweep` (default 500) per sweep cycle in configurable batches (default 50).
+- **Graceful Shutdown**:
+  - Intercepts `SIGINT` and `SIGTERM` signals.
+  - Immediately disarms interval timers, waits for any in-flight database sweep transaction to cleanly finish, closes database connections (`prisma.$disconnect()`), and terminates with exit code 0.
 
 ### 3. Concurrency & Race Condition Mitigation
 
 A critical interview design challenge is the **Payment vs Expiration Race Condition**:
-*What happens if the customer clicks "Pay" at second 899 while the expiration worker triggers at second 900?*
+*What happens if the customer clicks "Pay" at second 899 while the expiration worker or sweeper triggers at second 900?*
+*What happens if the sweeper and BullMQ worker attempt to expire the same order at the exact same millisecond?*
 
-- **Atomic State Guard**: Status transitions use strict SQL conditions:
+- **Atomic State Guard (Compare-And-Swap)**:
+  Status transitions use strict SQL conditions inside an interactive PostgreSQL transaction:
   ```sql
   UPDATE "Order" SET status = 'CANCELLED' WHERE id = :id AND status = 'PENDING';
   ```
-- **Conditional Count Check**: If the update returns `count !== 1`, the order is already in `PAYMENT_PROCESSING`, `CONFIRMED`, or `CANCELLED`.
-- **Payment Safety**: If payment has started (`PAYMENT_PROCESSING`), expiration aborts with HTTP 409 (`ORDER_NOT_ELIGIBLE_FOR_EXPIRATION`) and the worker logs a graceful no-op (`expired: false`).
-- **Inventory Safety**: Inventory is only released when the order successfully transitions from `PENDING` to `CANCELLED`, completely preventing double-release or overselling.
-- **Transactional Outbox Dispatch**: An `ORDER_EXPIRED` event is written within the exact same database transaction, ensuring downstream event consistency.
+- **PostgreSQL Row Write Locking**:
+  - When two workers (e.g. Sweeper and BullMQ Worker) execute this update simultaneously, PostgreSQL serializes write access on the `Order` row.
+  - The first worker updates the row (`count = 1`), releases inventory, records the audit history, emits the outbox event, and commits.
+  - The second worker waits for the first to commit. Once unblocked, the row's status is now `CANCELLED`, so the condition `status = 'PENDING'` matches 0 rows (`count = 0`).
+  - The second worker detects `count !== 1`, immediately aborts and rolls back its transaction, throwing `"Order is not eligible for expiration"`.
+  - The worker / sweeper catches this expected error, classifies the order as `skipped`, and avoids double-releasing inventory or throwing unhandled errors.
+- **Payment Safety**:
+  - When a customer begins payment, `startPayment` performs an atomic CAS:
+    ```sql
+    UPDATE "Order" SET status = 'PAYMENT_PROCESSING' WHERE id = :id AND status = 'PENDING';
+    ```
+  - If payment started first, the order is no longer in `PENDING` state. Any subsequent expiration attempt fails the CAS condition and aborts with HTTP 409 (`ORDER_NOT_ELIGIBLE_FOR_EXPIRATION`), completely preventing cancellation of in-flight payments.
+- **Inventory Safety (Exact-Once Restoration)**:
+  - Inventory restoration executes conditional SQL:
+    ```sql
+    UPDATE "Inventory" SET reserved = reserved - :qty, available = available + :qty
+    WHERE "productId" = :productId AND reserved >= :qty;
+    ```
+  - If any inventory update fails, the entire transaction throws and rolls back, ensuring that no partially released inventory or mismatched counts ever occur.
+- **Transactional Outbox Dispatch**:
+  - An `ORDER_EXPIRED` event is written within the exact same database transaction, ensuring downstream event consistency.
 
-### 4. Architecture Trade-Offs Considered
+### 4. Failure Recovery & Operational Limitations
+
+- **Transient Write Conflicts**: Wrapped in `withTransactionRetry` with exponential backoff to handle PostgreSQL serialization conflicts (error `P2034`).
+- **Database Downtime**: If PostgreSQL is completely unreachable, the sweep iteration logs an error with correlation context and safely retries on the next scheduled interval without crashing the process.
+- **Batch Upper Bound**: A hard ceiling of 500 orders per sweep cycle prevents backlog stampedes from blocking the database connection pool; backlogged orders are drained progressively across consecutive intervals.
+- **Trade-Off — Sweeper Interval vs Database Load**: Polling interval defaults to 30 seconds (`ORDER_SWEEPER_INTERVAL_MS=30000`). Faster intervals (e.g. 5s) reduce reclamation latency but increase read traffic; slower intervals reduce DB overhead but increase the window during which abandoned inventory remains locked. Combined with real-time BullMQ delayed jobs, the 30-second sweeper provides the optimal balance of zero steady-state latency and robust self-healing reliability.
+
+### 5. Architecture Trade-Offs Considered
 
 | Expiration Strategy | Advantages | Trade-Offs / Disadvantages |
 | :--- | :--- | :--- |
-| **BullMQ Delayed Jobs + Sweeper** *(Implemented)* | Real-time precision; low database load ($O(1)$ push scheduling); bulletproof reliability with sweeper reconciliation fallback. | Requires Redis and active background worker. |
+| **BullMQ Delayed Jobs + Sweeper Runner** *(Implemented)* | Real-time precision; low database load ($O(1)$ push scheduling); bulletproof reliability with standalone sweeper reconciliation fallback and CAS concurrency protection. | Requires Redis and running two background processes (worker + sweeper). |
 | **Database Polling Sweeper Only** | Simple architecture; zero Redis queue dependency. | High database read amplification; high latency to inventory release (orders stay locked until the next sweep interval). |
 | **Redis Key Expiration (Keyspace Notifications)** | In-memory pub/sub notifications on key TTL expiry. | Pub/Sub is fire-and-forget; if worker is offline at the moment of expiration, the event is permanently lost without recovery. |
 
@@ -168,6 +211,8 @@ A critical interview design challenge is the **Payment vs Expiration Race Condit
 | `REDIS_URL` | Redis connection URL | `redis://127.0.0.1:6379` |
 | `PRODUCT_CACHE_TTL_SECONDS` | Product cache expiration time (seconds) | `60` |
 | `ORDER_EXPIRATION_SECONDS` | Order inventory reservation TTL before auto-cancellation (seconds) | `900` (15 min) |
+| `ORDER_SWEEPER_INTERVAL_MS` | Periodic reservation sweeper execution interval (milliseconds) | `30000` (30 sec) |
+| `ORDER_SWEEPER_BATCH_SIZE` | Batch size limit per sweeper query iteration | `50` |
 | `LOG_LEVEL` | Pino log level (`info`, `warn`, `error`, `debug`) | `info` |
 
 ---
@@ -193,10 +238,16 @@ npx prisma migrate dev
 npm run dev
 ```
 
-### 5. Start Background Workers
+### 5. Start Background Workers & Sweeper
 ```bash
+# Terminal 1: Real-time BullMQ event worker (processes delayed expiration jobs & confirmation notifications)
 npm run worker
+
+# Terminal 2: Transactional outbox publisher runner
 npm run outbox
+
+# Terminal 3: Automated periodic reservation sweeper runner
+npm run sweeper
 ```
 
 ### 6. Run Test Suite
