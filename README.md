@@ -24,6 +24,123 @@ A distributed, high-performance E-Commerce Order & Inventory Management Engine e
 - **Product Caching (Cache-Aside)**: High-speed read caching for product detail and paginated listings using Redis with automated invalidation and database fallback.
 - **Order Reservation Expiration & Auto-Release**: Dual-layer reservation lifecycle management combining BullMQ delayed jobs, a dedicated automated background sweeper runner, and administrative batch reconciliation endpoints to reclaim inventory from abandoned checkouts, emit `ORDER_EXPIRED` outbox events, and prevent stock starvation.
 - **Distributed Advisory Locking**: Multi-replica coordination using PostgreSQL session-level advisory locks on dedicated database connections to prevent duplicate execution across horizontally scaled container instances.
+- **Dead-Letter Queue (DLQ) & Exponential Backoff**: Resilient transactional outbox retry mechanism featuring configurable exponential backoff delays with optional jitter, automated `DEAD_LETTER` transition upon exceeding maximum retry thresholds, and administrative observability endpoints (`/admin/outbox/dead-letter`) with safe manual replay capabilities.
+
+---
+
+## Transactional Outbox: Dead-Letter Queue (DLQ) & Exponential Backoff
+
+### 1. The Need for Exponential Backoff & Dead-Letter Queues
+
+In high-throughput event-driven microservices architectures, transactional outbox publishing can fail for transient or permanent reasons:
+- **Transient Failures**: Redis connection timeouts, temporary message queue saturation, or short-lived network glitches.
+- **Poison / Permanent Failures**: Schema incompatibilities, corrupt payload data, or downstream consumers that permanently reject an event.
+
+Without exponential backoff and a dead-letter mechanism, unhandled failures trigger an infinite retry loop:
+1. **Runner Saturation**: The publisher repeatedly queries and retries failing events every tick (every 2 seconds), starving newly created events from being published.
+2. **Thundering Herd / Cascading Failures**: Hammering an already overwhelmed message broker multiplies downstream pressure.
+3. **Log Flood**: Application logs are spammed with repeated stack traces every 2 seconds.
+
+### 2. Exponential Backoff Formula & Scheduling
+
+Failed outbox events are scheduled with exponential backoff delays persisted directly in PostgreSQL (`nextAttemptAt`), ensuring retry schedules survive process restarts:
+
+$$\text{delay} = \min\left(\text{baseDelay} \times 2^{\text{attempts} - 1}, \text{maxDelay}\right) + \text{jitter}$$
+
+#### Configuration Parameters
+
+| Environment Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `OUTBOX_RETRY_BASE_DELAY_MS` | `5000` (5 seconds) | Initial delay after the first delivery failure |
+| `OUTBOX_RETRY_MAX_DELAY_MS` | `900000` (15 minutes) | Maximum delay cap for exponential backoff progression |
+| `OUTBOX_MAX_ATTEMPTS` | `5` | Maximum delivery attempts before transitioning to `DEAD_LETTER` |
+| `OUTBOX_RETRY_JITTER_ENABLED` | `false` | When enabled, adds bounded random noise to prevent synchronized retries |
+| `OUTBOX_RETRY_JITTER_FACTOR` | `0.2` (20%) | Maximum random jitter percentage added to calculated backoff |
+
+#### Progression Timeline (Default Configuration)
+
+| Attempt # | Calculated Delay | Next Retry Window | Outcome If Failure Persists |
+| :--- | :--- | :--- | :--- |
+| **Attempt 1** | $5000 \times 2^0 = 5\,\text{s}$ | $+5$ seconds from failure | Remains `PENDING`, `nextAttemptAt` scheduled |
+| **Attempt 2** | $5000 \times 2^1 = 10\,\text{s}$ | $+10$ seconds from failure | Remains `PENDING`, `nextAttemptAt` scheduled |
+| **Attempt 3** | $5000 \times 2^2 = 20\,\text{s}$ | $+20$ seconds from failure | Remains `PENDING`, `nextAttemptAt` scheduled |
+| **Attempt 4** | $5000 \times 2^3 = 40\,\text{s}$ | $+40$ seconds from failure | Remains `PENDING`, `nextAttemptAt` scheduled |
+| **Attempt 5** | $\text{Exceeds Max}$ | Immediate transition | **Transitions permanently to `DEAD_LETTER`** |
+
+### 3. Database Schema & State Lifecycle
+
+The `OutboxEvent` entity maintains persistent lifecycle state:
+
+```prisma
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  DEAD_LETTER
+}
+
+model OutboxEvent {
+  id             String       @id @default(cuid())
+  eventType      String
+  aggregateId    String
+  payload        Json
+  createdAt      DateTime     @default(now())
+  processedAt    DateTime?
+  attempts       Int          @default(0)
+  lastError      String?
+  status         OutboxStatus @default(PENDING)
+  nextAttemptAt  DateTime?
+  deadLetteredAt DateTime?
+
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([status, deadLetteredAt])
+  @@index([processedAt, createdAt])
+  @@index([aggregateId])
+}
+```
+
+```
+                    ┌────────────────────────┐
+                    │      Order Commit      │
+                    │   (status = PENDING)   │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+          ┌────────►│    Publish Attempt     │
+          │         └───────────┬────────────┘
+          │                     │
+          │            Success? │
+          │           ┌─────────┴─────────┐
+          │       Yes │                   │ No
+          │           ▼                   ▼
+          │   ┌───────────────┐   ┌────────────────────────┐
+          │   │   PUBLISHED   │   │ Increment `attempts`   │
+          │   │ processedAt   │   │ Capture `lastError`    │
+          │   └───────────────┘   └───────────┬────────────┘
+          │                                   │
+          │                       Attempts >= maxAttempts?
+          │                      ┌────────────┴────────────┐
+          │                   No │                         │ Yes
+          │                      ▼                         ▼
+          │         ┌────────────────────────┐   ┌───────────────────┐
+          └─────────┤   Calculate Backoff    │   │    DEAD_LETTER    │
+                    │ Set `nextAttemptAt`    │   │ `deadLetteredAt`  │
+                    │ (Excluded until due)   │   │ Excluded from run │
+                    └────────────────────────┘   └─────────┬─────────┘
+                                                           │
+                                                           │ Admin /replay
+                                                           ▼
+                                                 ┌───────────────────┐
+                                                 │ Resets to PENDING │
+                                                 │ attempts = 0      │
+                                                 │ nextAttemptAt=now │
+                                                 └───────────────────┘
+```
+
+#### State Invariants
+- **No Event Loss**: Failed events are never deleted from the database.
+- **Exclusion from Normal Loop**: `DEAD_LETTER` events and events whose `nextAttemptAt > now` are strictly excluded by the database query (`WHERE status = 'PENDING' AND (nextAttemptAt IS NULL OR nextAttemptAt <= now)`).
+- **Restart Immunity**: Because retry counts and timestamps reside in PostgreSQL rows, worker restarts or container rescheduling preserve exact retry history.
 
 ---
 
