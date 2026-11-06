@@ -15,6 +15,7 @@ export const errorHandler: ErrorRequestHandler = (
       : err.message === "Product not found" ||
           err.message === "One or more products were not found" ||
           err.message === "Order not found" ||
+          err.message === "Dead-letter event not found" ||
           (err as { code?: string }).code === "P2025"
         ? 404
         : err.message === "Insufficient inventory" ||
@@ -75,6 +76,10 @@ export const errorHandler: ErrorRequestHandler = (
     "Order not found": {
       code: "ORDER_NOT_FOUND",
       message: "Order not found",
+    },
+    "Dead-letter event not found": {
+      code: "DEAD_LETTER_EVENT_NOT_FOUND",
+      message: "Dead-letter event not found",
     },
     "Order is not eligible for payment": {
       code: "ORDER_NOT_ELIGIBLE_FOR_PAYMENT",
