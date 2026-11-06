@@ -460,6 +460,13 @@ describe("Distributed Advisory Locking for Background Workers", () => {
       expect(failedEvent?.attempts).toBe(1);
       expect(failedEvent?.processedAt).toBeNull();
       expect(failedEvent?.lastError).toContain("Simulated BullMQ Redis connection timeout");
+      expect(failedEvent?.nextAttemptAt).not.toBeNull();
+
+      // Fast-forward nextAttemptAt so the event enters its retry eligibility window
+      await prisma.outboxEvent.update({
+        where: { id: event.id },
+        data: { nextAttemptAt: new Date(Date.now() - 1000) },
+      });
 
       // Second attempt succeeds (retry)
       await lock.withLock(async () => {
