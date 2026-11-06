@@ -74,6 +74,16 @@ export class PostgresAdvisoryLock {
     }
 
     try {
+      if (this.client) {
+        try {
+          this.client.removeAllListeners();
+          await this.client.end();
+        } catch {
+          // Ignore disconnect error on stale client
+        }
+        this.client = null;
+      }
+
       this.client = new Client({
         connectionString: this.connectionString,
       });
@@ -147,6 +157,7 @@ export class PostgresAdvisoryLock {
         "Error attempting to acquire advisory lock; failing closed (safe skip)",
       );
       this.isLockedState = false;
+      this.isConnectedState = false;
       return false;
     }
   }
@@ -186,6 +197,7 @@ export class PostgresAdvisoryLock {
         "Error releasing advisory lock",
       );
       this.isLockedState = false;
+      this.isConnectedState = false;
       return false;
     }
   }
@@ -230,6 +242,7 @@ export class PostgresAdvisoryLock {
 
     try {
       if (this.client) {
+        this.client.removeAllListeners();
         await this.client.end();
       }
     } catch (err) {

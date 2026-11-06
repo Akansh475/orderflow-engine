@@ -9,6 +9,7 @@ import prisma from "../../config/database.js";
 const INTERVAL_MS = 2000;
 let running = false;
 let shuttingDown = false;
+let timer: NodeJS.Timeout | null = null;
 
 export const outboxLock = new PostgresAdvisoryLock({
   lockId: ADVISORY_LOCK_IDS.OUTBOX_PUBLISHER,
@@ -27,7 +28,7 @@ export async function processOutbox(): Promise<{ executed: boolean; found?: numb
       const result = await outboxPublisher.publishPendingEvents();
 
       if (result.found > 0) {
-        console.log("Outbox batch processed:", result);
+        logger.info({ found: result.found }, "Outbox batch processed successfully");
       }
 
       return result;
@@ -43,25 +44,34 @@ export async function processOutbox(): Promise<{ executed: boolean; found?: numb
 
     return { executed: true, found: lockResult.result?.found ?? 0 };
   } catch (error) {
-    console.error("Outbox processing failed:", error);
+    logger.error({ err: error }, "Outbox processing failed");
     return { executed: false };
   } finally {
     running = false;
   }
 }
 
-const timer = setInterval(() => {
+export function startOutboxRunner(): void {
+  if (timer || shuttingDown) return;
+  timer = setInterval(() => {
+    void processOutbox();
+  }, INTERVAL_MS);
   void processOutbox();
-}, INTERVAL_MS);
+}
 
-void processOutbox();
+export function stopOutboxRunner(): void {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
 
 export async function shutdown(signal = "SIGTERM"): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
 
   logger.info({ signal }, "Shutting down outbox publisher runner...");
-  clearInterval(timer);
+  stopOutboxRunner();
 
   while (running) {
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -78,5 +88,8 @@ export async function shutdown(signal = "SIGTERM"): Promise<void> {
   process.exit(0);
 }
 
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+if (process.env.NODE_ENV !== "test") {
+  startOutboxRunner();
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+}
