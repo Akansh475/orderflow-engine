@@ -142,6 +142,81 @@ model OutboxEvent {
 - **Exclusion from Normal Loop**: `DEAD_LETTER` events and events whose `nextAttemptAt > now` are strictly excluded by the database query (`WHERE status = 'PENDING' AND (nextAttemptAt IS NULL OR nextAttemptAt <= now)`).
 - **Restart Immunity**: Because retry counts and timestamps reside in PostgreSQL rows, worker restarts or container rescheduling preserve exact retry history.
 
+### 4. Dead-Letter Observability & Administration API
+
+Administrative endpoints provide inspection and controlled remediation for failed events without exposing sensitive business payloads publicly:
+
+#### Security & Authentication
+- Protected by `adminAuthMiddleware`.
+- Requires the `x-admin-key: <key>` header or `Authorization: Bearer <key>`.
+- Configured via the `ADMIN_API_KEY` environment variable.
+
+#### Endpoint Reference
+
+| Method & Route | Query / Body Parameters | Success Response | Description |
+| :--- | :--- | :--- | :--- |
+| `GET /admin/outbox/dead-letter` | `page=1`, `limit=20`, `eventType=ORDER_CONFIRMED` | `200 OK` + Paginated Event List | Inspect dead-lettered events with filtering and metadata |
+| `GET /admin/outbox/dead-letter/:id` | None | `200 OK` + Event Detail | View complete payload, error trace, and attempt history for an event |
+| `POST /admin/outbox/dead-letter/:id/replay` | None | `200 OK` + Requeued Event | Safely reset status to `PENDING` to trigger a new cycle of delivery |
+
+#### Example: Inspecting Dead-Letter Events
+```bash
+curl -X GET "http://localhost:3000/admin/outbox/dead-letter?page=1&limit=10" \
+  -H "x-admin-key: secret-admin-key"
+```
+
+Response:
+```json
+{
+  "data": [
+    {
+      "id": "cmw58okcd0002u92svopwc3vr",
+      "eventType": "ORDER_CONFIRMED",
+      "aggregateId": "cmw58okb60000u92salyvh33h",
+      "payload": {
+        "orderId": "cmw58okb60000u92salyvh33h",
+        "customerId": "cust-1"
+      },
+      "attempts": 5,
+      "lastError": "Connection to message broker timed out after 5000ms",
+      "status": "DEAD_LETTER",
+      "deadLetteredAt": "2026-11-06T17:19:18.789Z",
+      "createdAt": "2026-11-06T17:19:00.000Z",
+      "processedAt": null,
+      "nextAttemptAt": null
+    }
+  ],
+  "pagination": {
+    "total": 1,
+    "page": 1,
+    "limit": 10,
+    "totalPages": 1
+  }
+}
+```
+
+### 5. Safe Replay Architecture
+
+Automatic retry loops must stop after maximum attempts to prevent continuous broker thrashing. When the underlying issue is resolved (e.g., downstream schema deployed, networking recovered), administrators initiate **Safe Manual Replay**:
+
+1. **Decoupled Execution**: Calling `POST /admin/outbox/dead-letter/:id/replay` does **not** synchronously invoke downstream publishers or block the HTTP request.
+2. **State Reset**: Atomically resets `status = 'PENDING'`, `attempts = 0`, `nextAttemptAt = now`, and clears `deadLetteredAt`.
+3. **Coordination**: The event is placed back into the pending queue. The background runner (`outbox.runner.ts`) picks it up on its next cycle under distributed PostgreSQL advisory lock mutual exclusion.
+4. **Audit Trail**: Every manual replay action produces a structured log event with the event ID, aggregate ID, and timestamp.
+
+### 6. At-Least-Once Delivery & Idempotency Considerations
+
+In distributed computing, guaranteed delivery over unreliable networks inherently operates under **At-Least-Once** semantics:
+- If a publisher sends an event to BullMQ/Redis and the network connection drops before PostgreSQL commits `processedAt = now`, the event will be re-delivered on the subsequent retry tick.
+- **Never Claim Exactly-Once**: Truly exactly-once delivery across disjoint systems (PostgreSQL and Redis/BullMQ) is mathematically impossible without two-phase commit (2PC), which introduces severe availability bottlenecks.
+- **Defense in Downstream Consumers**: Downstream consumers (`order.worker.ts`) enforce idempotency via the `ProcessedEvent` table:
+  ```sql
+  INSERT INTO "ProcessedEvent" ("id", "eventId", "processedAt")
+  VALUES (gen_random_uuid(), :jobId, NOW())
+  ON CONFLICT ("eventId") DO NOTHING;
+  ```
+  If the insert yields zero rows (event already processed), the job completes immediately without duplicate processing or double fulfillment.
+
 ---
 
 ## Distributed Advisory Locking Architecture
