@@ -81,3 +81,52 @@ export function getOutboxRetryJitterFactor(): number {
 export function getAdminApiKey(): string | undefined {
   return process.env.ADMIN_API_KEY ? process.env.ADMIN_API_KEY.trim() : undefined;
 }
+
+export const DEFAULT_WEBHOOK_HTTP_TIMEOUT_MS = 5000; // 5 seconds
+export const DEFAULT_WEBHOOK_MAX_ATTEMPTS = 5;
+export const DEFAULT_WEBHOOK_RETRY_BASE_DELAY_MS = 2000; // 2 seconds
+export const DEFAULT_WEBHOOK_RETRY_MAX_DELAY_MS = 60000; // 1 minute
+export const DEFAULT_ALLOW_LOCAL_WEBHOOKS = false;
+
+export function getWebhookHttpTimeoutMs(): number {
+  const envVal = process.env.WEBHOOK_HTTP_TIMEOUT_MS;
+  if (!envVal) return DEFAULT_WEBHOOK_HTTP_TIMEOUT_MS;
+  const parsed = Number(envVal);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_WEBHOOK_HTTP_TIMEOUT_MS;
+}
+
+export function getWebhookMaxAttempts(): number {
+  const envVal = process.env.WEBHOOK_MAX_ATTEMPTS;
+  if (!envVal) return DEFAULT_WEBHOOK_MAX_ATTEMPTS;
+  const parsed = Number(envVal);
+  return Number.isFinite(parsed) && parsed >= 1
+    ? Math.floor(parsed)
+    : DEFAULT_WEBHOOK_MAX_ATTEMPTS;
+}
+
+export function getWebhookRetryBaseDelayMs(): number {
+  const envVal = process.env.WEBHOOK_RETRY_BASE_DELAY_MS;
+  if (!envVal) return DEFAULT_WEBHOOK_RETRY_BASE_DELAY_MS;
+  const parsed = Number(envVal);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_WEBHOOK_RETRY_BASE_DELAY_MS;
+}
+
+export function getWebhookRetryMaxDelayMs(): number {
+  const envVal = process.env.WEBHOOK_RETRY_MAX_DELAY_MS;
+  if (!envVal) return DEFAULT_WEBHOOK_RETRY_MAX_DELAY_MS;
+  const parsed = Number(envVal);
+  const baseDelay = getWebhookRetryBaseDelayMs();
+  return Number.isFinite(parsed) && parsed >= baseDelay
+    ? parsed
+    : DEFAULT_WEBHOOK_RETRY_MAX_DELAY_MS;
+}
+
+export function getAllowLocalWebhooks(): boolean {
+  const envVal = process.env.ALLOW_LOCAL_WEBHOOKS;
+  if (!envVal) return DEFAULT_ALLOW_LOCAL_WEBHOOKS;
+  return envVal.toLowerCase() === "true" || envVal === "1";
+}
