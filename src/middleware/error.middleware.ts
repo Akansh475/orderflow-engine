@@ -16,6 +16,8 @@ export const errorHandler: ErrorRequestHandler = (
           err.message === "One or more products were not found" ||
           err.message === "Order not found" ||
           err.message === "Dead-letter event not found" ||
+          err.message === "Webhook subscription not found" ||
+          err.message === "Webhook delivery not found" ||
           (err as { code?: string }).code === "P2025"
         ? 404
         : err.message === "Insufficient inventory" ||
@@ -80,6 +82,14 @@ export const errorHandler: ErrorRequestHandler = (
     "Dead-letter event not found": {
       code: "DEAD_LETTER_EVENT_NOT_FOUND",
       message: "Dead-letter event not found",
+    },
+    "Webhook subscription not found": {
+      code: "WEBHOOK_NOT_FOUND",
+      message: "Webhook subscription not found",
+    },
+    "Webhook delivery not found": {
+      code: "WEBHOOK_DELIVERY_NOT_FOUND",
+      message: "Webhook delivery not found",
     },
     "Order is not eligible for payment": {
       code: "ORDER_NOT_ELIGIBLE_FOR_PAYMENT",

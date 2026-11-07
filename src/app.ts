@@ -5,6 +5,7 @@ import { logger, httpLogger } from "./config/logger.js";
 import productRoutes from "./modules/products/product.routes.js";
 import orderRoutes from "./modules/orders/order.routes.js";
 import outboxRoutes from "./modules/outbox/outbox.routes.js";
+import webhookRoutes from "./modules/webhooks/webhook.routes.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import {
   generalRateLimit,
@@ -61,6 +62,7 @@ app.use("/products", productRoutes);
 app.use("/orders", orderRoutes);
 app.use("/admin/outbox", outboxRoutes);
 app.use("/outbox/admin", outboxRoutes);
+app.use("/admin/webhooks", webhookRoutes);
 
 app.use(errorHandler);
 

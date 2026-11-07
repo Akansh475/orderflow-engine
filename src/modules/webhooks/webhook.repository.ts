@@ -7,9 +7,9 @@ import {
 } from "@prisma/client";
 
 export interface WebhookListOptions {
-  page?: number;
-  limit?: number;
-  isActive?: boolean;
+  page?: number | undefined;
+  limit?: number | undefined;
+  isActive?: boolean | undefined;
 }
 
 export interface WebhookListResult {
@@ -21,11 +21,11 @@ export interface WebhookListResult {
 }
 
 export interface DeliveryListOptions {
-  page?: number;
-  limit?: number;
-  status?: WebhookDeliveryStatus;
-  webhookId?: string;
-  outboxEventId?: string;
+  page?: number | undefined;
+  limit?: number | undefined;
+  status?: WebhookDeliveryStatus | undefined;
+  webhookId?: string | undefined;
+  outboxEventId?: string | undefined;
 }
 
 export interface DeliveryListResult {
@@ -43,10 +43,10 @@ export const webhookRepository = {
   async createSubscription(data: {
     url: string;
     secret: string;
-    name?: string;
-    description?: string;
-    isActive?: boolean;
-    eventTypes?: string[];
+    name?: string | undefined;
+    description?: string | undefined;
+    isActive?: boolean | undefined;
+    eventTypes?: string[] | undefined;
   }): Promise<WebhookSubscription> {
     return prisma.webhookSubscription.create({
       data: {
