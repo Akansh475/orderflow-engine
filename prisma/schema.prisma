@@ -126,3 +126,49 @@ model ProcessedEvent {
 
   @@index([processedAt])
 }
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model WebhookSubscription {
+  id          String            @id @default(cuid())
+  name        String?
+  description String?
+  url         String
+  secret      String
+  isActive    Boolean           @default(true)
+  eventTypes  String[]          @default(["OUTBOX_DEAD_LETTER"])
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  deliveries  WebhookDelivery[]
+
+  @@index([isActive])
+}
+
+model WebhookDelivery {
+  id            String                @id @default(cuid())
+  webhookId     String
+  webhook       WebhookSubscription   @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  outboxEventId String
+  eventType     String
+  payload       Json
+  status        WebhookDeliveryStatus @default(PENDING)
+  attempts      Int                   @default(0)
+  maxAttempts   Int                   @default(5)
+  nextAttemptAt DateTime?
+  statusCode    Int?
+  responseBody  String?
+  error         String?
+  durationMs    Int?
+  deliveredAt   DateTime?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@unique([webhookId, outboxEventId])
+  @@index([status, nextAttemptAt])
+  @@index([outboxEventId])
+  @@index([createdAt])
+}
