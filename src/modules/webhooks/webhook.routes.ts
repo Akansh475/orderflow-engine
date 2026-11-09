@@ -7,6 +7,12 @@ const router = Router();
 // All webhook management endpoints require administrative authorization
 router.use(adminAuthMiddleware);
 
+// Deliveries inspection and replay
+router.get("/deliveries", webhookController.listDeliveries);
+router.get("/deliveries/:id", webhookController.getDeliveryById);
+router.post("/deliveries/:id/replay", webhookController.replayDelivery);
+
+// Subscriptions management
 router.post("/", webhookController.create);
 router.get("/", webhookController.list);
 router.get("/:id", webhookController.getById);

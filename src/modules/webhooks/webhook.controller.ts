@@ -4,6 +4,7 @@ import {
   createWebhookSubscriptionSchema,
   updateWebhookSubscriptionSchema,
   webhookListQuerySchema,
+  deliveryListQuerySchema,
 } from "./webhook.validation.js";
 
 export const webhookController = {
@@ -77,6 +78,51 @@ export const webhookController = {
       res.status(200).json({
         message: "Webhook subscription deleted successfully",
         id: result.id,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /admin/webhooks/deliveries
+   * Lists webhook deliveries with pagination and optional filters.
+   */
+  async listDeliveries(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const query = deliveryListQuerySchema.parse(req.query);
+      const result = await webhookService.listDeliveries(query);
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /admin/webhooks/deliveries/:id
+   * Retrieves full details of a specific delivery record.
+   */
+  async getDeliveryById(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const id = req.params.id as string;
+      const delivery = await webhookService.getDeliveryById(id);
+      res.status(200).json({ data: delivery });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * POST /admin/webhooks/deliveries/:id/replay
+   * Manually queues a webhook delivery for replay.
+   */
+  async replayDelivery(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const id = req.params.id as string;
+      const replayed = await webhookService.replayDelivery(id);
+      res.status(200).json({
+        message: "Webhook delivery queued for replay",
+        data: replayed,
       });
     } catch (error) {
       next(error);

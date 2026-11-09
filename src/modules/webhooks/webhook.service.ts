@@ -3,12 +3,19 @@ import {
   webhookRepository,
   type WebhookListOptions,
   type WebhookListResult,
+  type DeliveryListOptions,
+  type DeliveryListResult,
 } from "./webhook.repository.js";
 import {
   type CreateWebhookSubscriptionInput,
   type UpdateWebhookSubscriptionInput,
 } from "./webhook.validation.js";
-import type { WebhookSubscription } from "@prisma/client";
+import {
+  type WebhookSubscription,
+  type WebhookDelivery,
+  WebhookDeliveryStatus,
+} from "@prisma/client";
+import { enqueueWebhookDelivery } from "../../queues/webhook.queue.js";
 import { logger } from "../../config/logger.js";
 
 export interface SafeWebhookSubscription {
@@ -140,5 +147,66 @@ export const webhookService = {
     logger.info({ webhookId: id }, "Deleted webhook subscription");
 
     return { id };
+  },
+
+  /**
+   * Lists webhook deliveries with pagination and optional filters.
+   */
+  async listDeliveries(
+    options?: DeliveryListOptions,
+  ): Promise<{ data: DeliveryListResult["deliveries"]; pagination: Omit<DeliveryListResult, "deliveries"> }> {
+    const { deliveries, total, page, limit, totalPages } =
+      await webhookRepository.listDeliveries(options);
+
+    return {
+      data: deliveries,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+      },
+    };
+  },
+
+  /**
+   * Retrieves a single delivery by ID, including subscription details.
+   */
+  async getDeliveryById(
+    id: string,
+  ): Promise<WebhookDelivery & { webhook: WebhookSubscription }> {
+    const delivery = await webhookRepository.findDeliveryById(id);
+    if (!delivery) {
+      throw new Error("Webhook delivery not found");
+    }
+    return delivery;
+  },
+
+  /**
+   * Manually queues a webhook delivery for replay.
+   * Resets status to PENDING, resets attempts to 0, sets nextAttemptAt to now,
+   * and enqueues to BullMQ for immediate processing.
+   */
+  async replayDelivery(id: string): Promise<WebhookDelivery> {
+    const existing = await webhookRepository.findDeliveryById(id);
+    if (!existing) {
+      throw new Error("Webhook delivery not found");
+    }
+
+    const replayed = await webhookRepository.updateDelivery(id, {
+      status: WebhookDeliveryStatus.PENDING,
+      attempts: 0,
+      nextAttemptAt: new Date(),
+      error: null,
+    });
+
+    logger.info(
+      { deliveryId: id, webhookId: replayed.webhookId, outboxEventId: replayed.outboxEventId },
+      "Admin manually queued webhook delivery for replay",
+    );
+
+    await enqueueWebhookDelivery(id);
+
+    return replayed;
   },
 };
