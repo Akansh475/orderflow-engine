@@ -13,7 +13,9 @@
     "dev:worker": "tsx watch src/workers/order.worker.ts",
     "outbox": "tsx src/modules/outbox/outbox.runner.ts",
     "sweeper": "tsx src/modules/orders/order.sweeper.runner.ts",
-    "dev:sweeper": "tsx watch src/modules/orders/order.sweeper.runner.ts"
+    "dev:sweeper": "tsx watch src/modules/orders/order.sweeper.runner.ts",
+    "webhook:worker": "tsx src/workers/webhook.worker.ts",
+    "dev:webhook:worker": "tsx watch src/workers/webhook.worker.ts"
   },
   "repository": {
     "type": "git",
