@@ -1,10 +1,20 @@
+import crypto from "node:crypto";
 import prisma from "../../config/database.js";
-import { type OutboxEvent, type Prisma, OutboxStatus } from "@prisma/client";
+import {
+  type OutboxEvent,
+  type Prisma,
+  OutboxStatus,
+  WebhookDeliveryStatus,
+} from "@prisma/client";
 import {
   calculateNextAttemptAt,
   isMaxAttemptsReached,
   type BackoffOptions,
 } from "./outbox.backoff.js";
+import { getWebhookMaxAttempts } from "../../config/env.js";
+import { createDeadLetterPayload } from "../webhooks/webhook.security.js";
+import { enqueueWebhookDelivery } from "../../queues/webhook.queue.js";
+import { logger } from "../../config/logger.js";
 
 export interface DeadLetterQueryOptions {
   page?: number | undefined;
@@ -76,16 +86,73 @@ export const outboxRepository = {
     const reachedMax = isMaxAttemptsReached(nextAttemptsCount, options?.maxAttempts);
 
     if (reachedMax) {
-      const deadLetterEvent = await prisma.outboxEvent.update({
-        where: { id: event.id },
-        data: {
-          status: OutboxStatus.DEAD_LETTER,
-          attempts: { increment: 1 },
-          lastError: errorMessage,
-          nextAttemptAt: null,
-          deadLetteredAt: new Date(),
-        },
+      const { deadLetterEvent, deliveriesToEnqueue } = await prisma.$transaction(async (tx) => {
+        const dlEvent = await tx.outboxEvent.update({
+          where: { id: event.id },
+          data: {
+            status: OutboxStatus.DEAD_LETTER,
+            attempts: { increment: 1 },
+            lastError: errorMessage,
+            nextAttemptAt: null,
+            deadLetteredAt: new Date(),
+          },
+        });
+
+        // Query active webhook destinations interested in this event or wildcard
+        const subscriptions = await tx.webhookSubscription.findMany({
+          where: {
+            isActive: true,
+            eventTypes: {
+              hasSome: [dlEvent.eventType, "OUTBOX_DEAD_LETTER", "*"],
+            },
+          },
+        });
+
+        const createdDeliveryIds: string[] = [];
+
+        for (const sub of subscriptions) {
+          const deliveryId = `whd_${crypto.randomUUID().replace(/-/g, "")}`;
+          const payload = createDeadLetterPayload(deliveryId, dlEvent);
+
+          try {
+            const delivery = await tx.webhookDelivery.create({
+              data: {
+                id: deliveryId,
+                webhookId: sub.id,
+                outboxEventId: dlEvent.id,
+                eventType: dlEvent.eventType,
+                payload: payload as unknown as Prisma.InputJsonValue,
+                status: WebhookDeliveryStatus.PENDING,
+                attempts: 0,
+                maxAttempts: getWebhookMaxAttempts(),
+                nextAttemptAt: new Date(),
+              },
+            });
+            createdDeliveryIds.push(delivery.id);
+          } catch (err: any) {
+            // @@unique([webhookId, outboxEventId]) prevents duplicate delivery records
+            if (err?.code !== "P2002") {
+              throw err;
+            }
+          }
+        }
+
+        return { deadLetterEvent: dlEvent, deliveriesToEnqueue: createdDeliveryIds };
       });
+
+      // Asynchronously dispatch notifications outside the database transaction.
+      // If BullMQ/Redis is temporarily unavailable, the durable WebhookDelivery
+      // records in PostgreSQL remain PENDING and can be recovered.
+      for (const deliveryId of deliveriesToEnqueue) {
+        try {
+          await enqueueWebhookDelivery(deliveryId);
+        } catch (enqueueErr) {
+          logger.warn(
+            { err: enqueueErr, deliveryId },
+            "Failed to enqueue webhook delivery job after transaction commit",
+          );
+        }
+      }
 
       return {
         event: deadLetterEvent,
