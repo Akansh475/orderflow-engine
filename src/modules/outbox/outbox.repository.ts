@@ -111,10 +111,19 @@ export const outboxRepository = {
         const createdDeliveryIds: string[] = [];
 
         for (const sub of subscriptions) {
-          const deliveryId = `whd_${crypto.randomUUID().replace(/-/g, "")}`;
-          const payload = createDeadLetterPayload(deliveryId, dlEvent);
+          const existing = await tx.webhookDelivery.findUnique({
+            where: {
+              webhookId_outboxEventId: {
+                webhookId: sub.id,
+                outboxEventId: dlEvent.id,
+              },
+            },
+          });
 
-          try {
+          if (!existing) {
+            const deliveryId = `whd_${crypto.randomUUID().replace(/-/g, "")}`;
+            const payload = createDeadLetterPayload(deliveryId, dlEvent);
+
             const delivery = await tx.webhookDelivery.create({
               data: {
                 id: deliveryId,
@@ -129,11 +138,6 @@ export const outboxRepository = {
               },
             });
             createdDeliveryIds.push(delivery.id);
-          } catch (err: any) {
-            // @@unique([webhookId, outboxEventId]) prevents duplicate delivery records
-            if (err?.code !== "P2002") {
-              throw err;
-            }
           }
         }
 
