@@ -25,6 +25,7 @@ A distributed, high-performance E-Commerce Order & Inventory Management Engine e
 - **Order Reservation Expiration & Auto-Release**: Dual-layer reservation lifecycle management combining BullMQ delayed jobs, a dedicated automated background sweeper runner, and administrative batch reconciliation endpoints to reclaim inventory from abandoned checkouts, emit `ORDER_EXPIRED` outbox events, and prevent stock starvation.
 - **Distributed Advisory Locking**: Multi-replica coordination using PostgreSQL session-level advisory locks on dedicated database connections to prevent duplicate execution across horizontally scaled container instances.
 - **Dead-Letter Queue (DLQ) & Exponential Backoff**: Resilient transactional outbox retry mechanism featuring configurable exponential backoff delays with optional jitter, automated `DEAD_LETTER` transition upon exceeding maximum retry thresholds, and administrative observability endpoints (`/admin/outbox/dead-letter`) with safe manual replay capabilities.
+- **Dead-Letter Alerting & Webhooks**: Production-grade notification system that alerts external webhook destinations when Outbox events permanently fail into `DEAD_LETTER`. Features durable PostgreSQL notification records, asynchronous BullMQ dispatch, SSRF network protection, HMAC-SHA256 request signing with replay tolerance, and administrative delivery inspection/replay endpoints.
 
 ---
 
@@ -216,6 +217,201 @@ In distributed computing, guaranteed delivery over unreliable networks inherentl
   ON CONFLICT ("eventId") DO NOTHING;
   ```
   If the insert yields zero rows (event already processed), the job completes immediately without duplicate processing or double fulfillment.
+
+---
+
+## Dead-Letter Alerting & Webhook Notifications
+
+### 1. The Operational Need for Automated Dead-Letter Alerting
+
+While the Dead-Letter Queue (DLQ) safely quarantines repeatedly failing events to prevent outbox runner lockups, engineers should not need to continuously poll database tables or manually ping the admin API to discover production anomalies.
+
+The Webhook Notification subsystem automatically informs external alerting systems (PagerDuty, Slack endpoints, internal incident bridges, webhook proxies) immediately when any outbox event reaches its terminal failure threshold and transitions to `DEAD_LETTER`.
+
+### 2. Architecture & Delivery Lifecycle Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Outbox as Outbox Runner
+    participant DB as PostgreSQL
+    participant Queue as BullMQ (webhook-delivery)
+    participant Worker as Webhook Worker
+    participant Dest as Webhook Destination Endpoint
+
+    Outbox->>DB: handleFailure(event, error) (Attempts >= Max)
+    Note over Outbox,DB: Atomic Database Transaction
+    DB->>DB: UPDATE OutboxEvent SET status = 'DEAD_LETTER'
+    DB->>DB: SELECT active WebhookSubscriptions (matching eventType / *)
+    DB->>DB: INSERT WebhookDelivery (status = 'PENDING', attempts = 0)
+    Note over DB: Unique constraint [webhookId, outboxEventId] prevents duplicates
+    DB-->>Outbox: Transaction Committed
+    Outbox->>Queue: enqueueWebhookDelivery(deliveryId)
+    Note over Outbox,Queue: Non-blocking async dispatch; Outbox is never blocked by HTTP
+    Queue->>Worker: Process Job (deliveryId)
+    Worker->>DB: Fetch WebhookDelivery & Subscription
+    Worker->>Worker: SSRF Destination Guard (IP validation & DNS lookup)
+    Worker->>Worker: Compute HMAC-SHA256 signature (x-orderflow-signature)
+    Worker->>Dest: POST destination URL (AbortSignal timeout)
+    alt HTTP 2xx Success
+        Dest-->>Worker: HTTP 200 OK
+        Worker->>DB: UPDATE WebhookDelivery SET status = 'SUCCESS', deliveredAt = NOW()
+    else HTTP 429 or 5xx Transient Server Error
+        Dest-->>Worker: HTTP 500 / 429 Error
+        Worker->>DB: UPDATE WebhookDelivery SET attempts += 1, status = 'PENDING', nextAttemptAt = NOW() + delay
+        Worker->>Queue: Re-enqueue with exponential backoff delay
+    else HTTP 4xx Client Error (Non-Retryable)
+        Dest-->>Worker: HTTP 400 / 404 Error
+        Worker->>DB: UPDATE WebhookDelivery SET status = 'FAILED', error = 'Non-retryable 4xx'
+    else Max Retry Attempts Exhausted
+        Worker->>DB: UPDATE WebhookDelivery SET status = 'FAILED', error = 'Max retry attempts reached'
+    end
+```
+
+### 3. Key Design Principles
+
+1. **Transactional Durability**:
+   - The creation of `WebhookDelivery` records occurs inside the **same database transaction** as the `OutboxEvent` transition to `DEAD_LETTER`.
+   - If the application crashes between database commit and BullMQ job submission, the notification is not lost; it remains safely in `PENDING` status in PostgreSQL.
+2. **Duplicate Prevention & Idempotency**:
+   - The database enforces `@@unique([webhookId, outboxEventId])`.
+   - Even if concurrent outbox workers or replays trigger `handleFailure` on the same event, duplicate logical notifications are prevented.
+3. **Decoupled Asynchronous Dispatch**:
+   - No HTTP requests are ever executed inside the Outbox transaction.
+   - Outbox publishing and transactional inventory state transitions are 100% independent of whether webhook destinations are responsive, slow, or offline.
+4. **SSRF Guard & Network Isolation**:
+   - Destinations are inspected at delivery time to prevent Server-Side Request Forgery (SSRF) and DNS rebinding attacks.
+   - Loops, link-local addresses, RFC 1918 private subnets, cloud metadata IPs (`169.254.169.254`), and IPv6 private/link-local ranges are blocked by default.
+   - Redirect following is disabled (`redirect: 'error'`) to prevent attackers from redirecting valid public URLs to internal services.
+   - In production (`NODE_ENV === 'production'`), HTTPS is strictly enforced.
+5. **HMAC-SHA256 Cryptographic Signing**:
+   - Every outgoing webhook delivery is signed using an endpoint-specific shared secret.
+   - Payloads include timestamp protection (`x-orderflow-signature: t=...,v1=...`) with replay tolerance verification.
+
+---
+
+### 4. Webhook Payload Schema (`v1`)
+
+```json
+{
+  "version": "v1",
+  "id": "whd_a1b2c3d4e5f67890",
+  "notificationType": "OUTBOX_DEAD_LETTER",
+  "outboxEventId": "cmw916us30000u9cpz6555013",
+  "eventType": "ORDER_CREATED",
+  "failureReason": "Downstream payment gateway connection timeout after 5000ms",
+  "attempts": 5,
+  "deadLetteredAt": "2026-11-09T17:00:00.000Z",
+  "createdAt": "2026-11-09T16:45:00.000Z"
+}
+```
+
+#### Field Specifications
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `version` | `string` | Payload schema version (`"v1"`) for forward-compatibility |
+| `id` | `string` | Unique notification delivery identifier (used for consumer deduplication) |
+| `notificationType` | `string` | Notification category (`"OUTBOX_DEAD_LETTER"`) |
+| `outboxEventId` | `string` | Identifier of the dead-lettered outbox event |
+| `eventType` | `string` | Business domain event type (e.g. `ORDER_CREATED`, `ORDER_EXPIRED`) |
+| `failureReason` | `string` | Error message or diagnostic detail from the final attempt |
+| `attempts` | `number` | Number of publishing attempts executed before moving to dead-letter |
+| `deadLetteredAt` | `string` | ISO 8601 timestamp when the event entered `DEAD_LETTER` status |
+| `createdAt` | `string` | ISO 8601 timestamp when the original domain event was generated |
+
+---
+
+### 5. HMAC-SHA256 Signature Verification Guide
+
+All webhook HTTP requests include the following security headers:
+- `x-orderflow-signature`: Signature token in format `t=<timestamp>,v1=<signature>`
+- `x-orderflow-timestamp`: Unix timestamp in milliseconds
+- `x-orderflow-event`: The domain event type
+- `x-orderflow-delivery-id`: Unique delivery ID
+
+#### Consumer Verification Implementation (Node.js)
+
+```typescript
+import crypto from "node:crypto";
+
+export function verifyWebhook(
+  rawBody: string,
+  signatureHeader: string,
+  secret: string,
+  toleranceMs: number = 300000, // 5 minutes
+): boolean {
+  if (!signatureHeader) return false;
+
+  const parts = signatureHeader.split(",");
+  let timestamp: number | undefined;
+  let signature: string | undefined;
+
+  for (const part of parts) {
+    const [key, val] = part.split("=");
+    if (key === "t" && val) timestamp = Number(val);
+    if (key === "v1" && val) signature = val;
+  }
+
+  if (!timestamp || !signature || Number.isNaN(timestamp)) {
+    return false;
+  }
+
+  // Enforce timestamp freshness to guard against replay attacks
+  if (Math.abs(Date.now() - timestamp) > toleranceMs) {
+    return false;
+  }
+
+  // Compute expected HMAC-SHA256 signature
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", secret)
+    .update(signedPayload)
+    .digest("hex");
+
+  const sigBuf = Buffer.from(signature, "hex");
+  const expBuf = Buffer.from(expectedSignature, "hex");
+
+  if (sigBuf.length !== expBuf.length) return false;
+
+  return crypto.timingSafeEqual(sigBuf, expBuf);
+}
+```
+
+---
+
+### 6. Administration & Observability API Reference
+
+All webhook administration endpoints require administrative authorization (`x-admin-key: <ADMIN_API_KEY>` or `Authorization: Bearer <ADMIN_API_KEY>`). In API responses, endpoint secrets are always masked (e.g., `••••••••7890`) and never exposed in plaintext.
+
+#### 1. Webhook Destination Management
+
+| Method | Route | Description |
+| :--- | :--- | :--- |
+| `POST` | `/admin/webhooks` | Register a new webhook endpoint. If `secret` is omitted, a 48-char hex secret is auto-generated. |
+| `GET` | `/admin/webhooks` | List registered destinations with pagination (`?page=1&limit=20&isActive=true`). |
+| `GET` | `/admin/webhooks/:id` | Retrieve subscription details by ID. |
+| `PATCH` | `/admin/webhooks/:id` | Update destination URL, description, active status (`isActive`), or subscribed event types. |
+| `DELETE` | `/admin/webhooks/:id` | Delete a destination and cascade delete its historical deliveries. |
+
+#### 2. Delivery History & Manual Replay
+
+| Method | Route | Description |
+| :--- | :--- | :--- |
+| `GET` | `/admin/webhooks/deliveries` | Inspect delivery history with pagination and filters (`?status=SUCCESS\|FAILED\|PENDING&webhookId=...`). |
+| `GET` | `/admin/webhooks/deliveries/:id` | Retrieve single delivery record including request/response duration, status code, and payload. |
+| `POST` | `/admin/webhooks/deliveries/:id/replay` | Reset a failed delivery to `PENDING` with 0 attempts and enqueue immediate retry. |
+
+---
+
+### 7. Delivery Retry Policy & Backoff Configuration
+
+| Error Category | HTTP Codes / Errors | Action | Retry Progression |
+| :--- | :--- | :--- | :--- |
+| **Transient Server Error** | HTTP `429`, `500`, `502`, `503`, `504` | Retry with exponential backoff | Delays: $\min(\text{baseDelay} \times 2^{\text{attempts}-1}, \text{maxDelay})$ |
+| **Network & Timeout** | `ETIMEDOUT`, `ECONNREFUSED`, `AbortError` | Retry with exponential backoff | Retried up to `WEBHOOK_MAX_ATTEMPTS` |
+| **Non-Retryable Client Error** | HTTP `400`, `401`, `403`, `404`, `410`, `422` | **Immediate permanent failure** | Marked `FAILED`, excluded from further retries |
+| **Security / SSRF Violation** | Loopback, private IP, invalid scheme | **Immediate permanent failure** | Marked `FAILED`, request never dispatched |
 
 ---
 
@@ -494,10 +690,21 @@ A critical interview design challenge is the **Payment vs Expiration Race Condit
 | `PORT` | HTTP server listening port | `3000` |
 | `DATABASE_URL` | PostgreSQL connection URL | `postgresql://...` |
 | `REDIS_URL` | Redis connection URL | `redis://127.0.0.1:6379` |
+| `ADMIN_API_KEY` | Administrative API key protecting dead-letter & webhook management routes | `undefined` |
 | `PRODUCT_CACHE_TTL_SECONDS` | Product cache expiration time (seconds) | `60` |
 | `ORDER_EXPIRATION_SECONDS` | Order inventory reservation TTL before auto-cancellation (seconds) | `900` (15 min) |
 | `ORDER_SWEEPER_INTERVAL_MS` | Periodic reservation sweeper execution interval (milliseconds) | `30000` (30 sec) |
 | `ORDER_SWEEPER_BATCH_SIZE` | Batch size limit per sweeper query iteration | `50` |
+| `OUTBOX_RETRY_BASE_DELAY_MS` | Initial backoff delay for outbox event delivery failures (ms) | `5000` (5 sec) |
+| `OUTBOX_RETRY_MAX_DELAY_MS` | Maximum backoff delay cap for outbox retries (ms) | `900000` (15 min) |
+| `OUTBOX_MAX_ATTEMPTS` | Maximum outbox delivery attempts before dead-lettering | `5` |
+| `OUTBOX_RETRY_JITTER_ENABLED`| Enable random jitter for outbox retries (`true`/`false`) | `false` |
+| `OUTBOX_RETRY_JITTER_FACTOR` | Maximum jitter factor percentage (`0.0` - `1.0`) | `0.2` (20%) |
+| `WEBHOOK_HTTP_TIMEOUT_MS` | Timeout for outgoing webhook HTTP POST requests (ms) | `5000` (5 sec) |
+| `WEBHOOK_MAX_ATTEMPTS` | Maximum webhook delivery attempts before marking `FAILED` | `5` |
+| `WEBHOOK_RETRY_BASE_DELAY_MS` | Base delay for webhook delivery exponential backoff (ms) | `2000` (2 sec) |
+| `WEBHOOK_RETRY_MAX_DELAY_MS` | Maximum delay cap for webhook delivery retries (ms) | `60000` (1 min) |
+| `ALLOW_LOCAL_WEBHOOKS` | Allow localhost / private IP destinations for testing | `false` |
 | `LOG_LEVEL` | Pino log level (`info`, `warn`, `error`, `debug`) | `info` |
 
 ---
@@ -533,6 +740,9 @@ npm run outbox
 
 # Terminal 3: Automated periodic reservation sweeper runner
 npm run sweeper
+
+# Terminal 4: BullMQ dead-letter webhook delivery worker
+npm run webhook:worker
 ```
 
 ### 6. Run Test Suite
