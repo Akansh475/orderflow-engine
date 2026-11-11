@@ -11,7 +11,7 @@ A distributed, high-performance E-Commerce Order & Inventory Management Engine e
 - **Caching & Queues**: Redis 7, BullMQ
 - **Validation**: Zod
 - **Testing**: Vitest, Supertest
-- **Logging**: Pino & Pino-HTT
+- **Logging**: Pino & Piino-HTT
 
 ---
 
