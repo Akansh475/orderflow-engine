@@ -7,7 +7,7 @@ A distributed, high-performance E-Commerce Order & Inventory Management Engine e
 - **Runtime**: Node.js (ES Modules)
 - **Web Framework**: Express 5
 - **Language**: TypeScript
-- **Database & ORM**: PostgreSQL 17, Prisma 6
+- **Database & ORM**: PostgreSQL 17, Prisma6
 - **Caching & Queues**: Redis 7, BullMQ
 - **Validation**: Zod
 - **Testing**: Vitest, Supertest
